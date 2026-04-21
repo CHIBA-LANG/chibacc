@@ -1,15 +1,578 @@
 namespace chibacc.codegen
+use metalstd.mem.*
 use metalstd.str.*
+use metalstd.vec.*
+use chibacc.ast.*
 use chibacc.ir.*
 
-// M0 skeleton code generator.
+// M2 executable source generator for ordinary rules.
 
-def codegen_parser(ir: GrammarIr): Str = {
+def emit_indent(out: Str, level: i64): i64 =
+    if level <= 0 { 0 }
+    else {
+        let _ = str_push_cstr(out, "    ")
+        emit_indent(out, level - 1)
+    }
+
+def emit_line_cstr(out: Str, level: i64, text: cstr): i64 = {
+    let _ = emit_indent(out, level)
+    let _ = str_push_cstr(out, text.ptr)
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_i64(out: Str, n: i64): i64 = str_append_i64(out, n)
+
+def emit_escaped_str_lit(out: Str, s: Str, i: i64): i64 =
+    if i >= s.len { 0 }
+    else {
+        let b = load8(s.ptr, i)
+        let _ = if b == 34 { str_push_cstr(out, "\\\"") }
+                else if b == 92 { str_push_cstr(out, "\\\\") }
+                else if b == 10 { str_push_cstr(out, "\\n") }
+                else if b == 9 { str_push_cstr(out, "\\t") }
+                else if b == 13 { str_push_cstr(out, "\\r") }
+                else { str_push(out, b) }
+        emit_escaped_str_lit(out, s, i + 1)
+    }
+
+def emit_str_expr(out: Str, s: Str): i64 = {
+    if s.len == 0 { str_push_cstr(out, "str_empty()") }
+    else {
+        let _ = str_push_cstr(out, "mk_str(\"")
+        let _ = emit_escaped_str_lit(out, s, 0)
+        let _ = str_push_cstr(out, "\", ")
+        let _ = emit_i64(out, s.len)
+        let _ = str_push(out, 41)
+        0
+    }
+}
+
+def ensure_block_trailing_nl(out: Str): i64 = {
+    if out.len == 0 { 0 }
+    else if load8(out.ptr, out.len - 1) == 10 { 0 }
+    else { str_push(out, 10) }
+}
+
+def emit_raw_block(out: Str, block: Str): i64 = {
+    let _ = if block.len > 0 { str_append(out, block) } else { 0 }
+    ensure_block_trailing_nl(out)
+}
+
+def is_token_name(name: Str): i64 =
+    if name.len <= 0 { 0 }
+    else {
+        let ch = load8(name.ptr, 0)
+        if ch >= 65 && ch <= 90 { 1 } else { 0 }
+    }
+
+def find_rule_index(rules: Vec, name: Str): i64 =
+    find_rule_index_loop(rules, name, 0)
+
+def find_rule_index_loop(rules: Vec, name: Str, i: i64): i64 =
+    if (name as i64) == 0 { 0 - 1 }
+    else if i >= vec_len(rules) { 0 - 1 }
+    else {
+        let rule = vec_get(rules, i) as IrRule
+        let rule_name = ir_rule_name(rule)
+        if (rule_name as i64) != 0 && streq(rule_name, name) != 0 { i }
+        else { find_rule_index_loop(rules, name, i + 1) }
+    }
+
+def is_repeat_quant(q: IrQuantifier): i64 =
+    match q {
+        IrQZeroOrMore => 1
+        IrQOneOrMore => 1
+        IrQRange(_, _) => 1
+        _ => 0
+    }
+
+def emit_value_params(out: Str, count: i64, i: i64): i64 =
+    if i >= count { 0 }
+    else {
+        let _ = str_push_cstr(out, ", __v")
+        let _ = emit_i64(out, i)
+        let _ = str_push_cstr(out, ": i64")
+        emit_value_params(out, count, i + 1)
+    }
+
+def emit_value_args(out: Str, count: i64, i: i64): i64 =
+    if i >= count { 0 }
+    else {
+        let _ = str_push_cstr(out, ", __v")
+        let _ = emit_i64(out, i)
+        emit_value_args(out, count, i + 1)
+    }
+
+def emit_rule_fn_name(out: Str, rule_i: i64): i64 = {
+    let _ = str_push_cstr(out, "parse_rule_")
+    emit_i64(out, rule_i)
+}
+
+def emit_alt_fn_name(out: Str, rule_i: i64, alt_i: i64): i64 = {
+    let _ = emit_rule_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "_alt_")
+    emit_i64(out, alt_i)
+}
+
+def emit_step_fn_name(out: Str, rule_i: i64, alt_i: i64, step_i: i64): i64 = {
+    let _ = emit_alt_fn_name(out, rule_i, alt_i)
+    let _ = str_push_cstr(out, "_step_")
+    emit_i64(out, step_i)
+}
+
+def emit_item_fn_name(out: Str, rule_i: i64, alt_i: i64, item_i: i64): i64 = {
+    let _ = emit_alt_fn_name(out, rule_i, alt_i)
+    let _ = str_push_cstr(out, "_item_")
+    emit_i64(out, item_i)
+}
+
+def emit_many_fn_name(out: Str, rule_i: i64, alt_i: i64, item_i: i64): i64 = {
+    let _ = emit_item_fn_name(out, rule_i, alt_i, item_i)
+    let _ = str_push_cstr(out, "_many")
+    0
+}
+
+def emit_rule_parse_call(out: Str, rules: Vec, name: Str): i64 = {
+    let idx = find_rule_index(rules, name)
+    if idx < 0 { str_push_cstr(out, "MatchFail") }
+    else {
+        let _ = emit_rule_fn_name(out, idx)
+        let _ = str_push_cstr(out, "(tokens, pos)")
+        0
+    }
+}
+
+def emit_atom_parse_expr(out: Str, rules: Vec, atom: IrAtom): i64 =
+    match atom {
+        IrAtomRef(name) => {
+            if (name as i64) == 0 { str_push_cstr(out, "MatchFail") }
+            else if streq(name, mk_str("Eof", 3)) != 0 {
+                str_push_cstr(out, "match_eof(tokens, pos)")
+            }
+            else if is_token_name(name) != 0 {
+                let _ = str_push_cstr(out, "match_token(tokens, pos, ")
+                let _ = emit_str_expr(out, name)
+                let _ = str_push(out, 41)
+                0
+            }
+            else {
+                emit_rule_parse_call(out, rules, name)
+            }
+        }
+        IrAtomPredicate(_) => str_push_cstr(out, "MatchFail")
+        IrAtomLookAnd(_) => str_push_cstr(out, "MatchFail")
+        IrAtomLookNot(_) => str_push_cstr(out, "MatchFail")
+    }
+
+def emit_label_binding(out: Str, item: IrItem, item_i: i64): i64 =
+    match item {
+        IrItem(label, atom, q) => {
+            if label.len == 0 { 0 }
+            else {
+                let _ = emit_indent(out, 1)
+                let _ = str_push_cstr(out, "let ")
+                let _ = str_append(out, label)
+                let _ = if q == IrQOptional { str_push_cstr(out, ": Option[i64] = __v") }
+                        else if is_repeat_quant(q) != 0 { str_push_cstr(out, ": Vec = __v") }
+                        else {
+                            match atom {
+                                IrAtomRef(name) => {
+                                    if is_token_name(name) != 0 { str_push_cstr(out, ": Str = __v") }
+                                    else { str_push_cstr(out, ": AST = __v") }
+                                }
+                                _ => str_push_cstr(out, " = __v")
+                            }
+                        }
+                let _ = emit_i64(out, item_i)
+                let _ = if q == IrQOptional { str_push_cstr(out, " as Option[i64]") }
+                        else if is_repeat_quant(q) != 0 { str_push_cstr(out, " as Vec") }
+                        else {
+                            match atom {
+                                IrAtomRef(name) => {
+                                    if is_token_name(name) != 0 { str_push_cstr(out, " as Str") }
+                                    else { str_push_cstr(out, " as AST") }
+                                }
+                                _ => 0
+                            }
+                        }
+                let _ = str_push(out, 10)
+                0
+            }
+        }
+    }
+
+def emit_label_bindings(out: Str, items: Vec, i: i64): i64 =
+    if i >= vec_len(items) { 0 }
+    else {
+        let item = vec_get(items, i) as IrItem
+        let _ = emit_label_binding(out, item, i)
+        emit_label_bindings(out, items, i + 1)
+    }
+
+def emit_done_fn(out: Str, rule_i: i64, alt_i: i64, alt: IrAlt): i64 =
+    match alt {
+        IrAlt(items, action) => {
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_step_fn_name(out, rule_i, alt_i, vec_len(items))
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+            let _ = emit_value_params(out, vec_len(items), 0)
+            let _ = str_push_cstr(out, "): MatchResult = {\n")
+            let _ = emit_label_bindings(out, items, 0)
+            let _ = emit_indent(out, 1)
+            let _ = str_push_cstr(out, "MatchOK((")
+            let _ = str_append(out, action)
+            let _ = str_push_cstr(out, ") as i64, pos)\n")
+            let _ = emit_line_cstr(out, 0, c"}")
+            let _ = str_push(out, 10)
+            0
+        }
+    }
+
+def emit_step_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, alt: IrAlt, step_i: i64): i64 =
+    match alt {
+        IrAlt(items, _) => {
+            if step_i >= vec_len(items) { emit_done_fn(out, rule_i, alt_i, alt) }
+            else {
+                let _ = emit_indent(out, 0)
+                let _ = str_push_cstr(out, "def ")
+                let _ = emit_step_fn_name(out, rule_i, alt_i, step_i)
+                let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+                let _ = emit_value_params(out, step_i, 0)
+                let _ = str_push_cstr(out, "): MatchResult =\n")
+                let _ = emit_indent(out, 1)
+                let _ = str_push_cstr(out, "match ")
+                let _ = emit_item_fn_name(out, rule_i, alt_i, step_i)
+                let _ = str_push_cstr(out, "(tokens, pos) {\n")
+                let _ = emit_indent(out, 2)
+                let _ = str_push_cstr(out, "MatchOK(__v")
+                let _ = emit_i64(out, step_i)
+                let _ = str_push_cstr(out, ", pos1) => ")
+                let _ = emit_step_fn_name(out, rule_i, alt_i, step_i + 1)
+                let _ = str_push_cstr(out, "(tokens, pos1")
+                let _ = emit_value_args(out, step_i, 0)
+                let _ = str_push_cstr(out, ", __v")
+                let _ = emit_i64(out, step_i)
+                let _ = str_push_cstr(out, ")\n")
+                let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
+                let _ = emit_line_cstr(out, 1, c"}")
+                let _ = str_push(out, 10)
+                emit_step_fn(out, rules, rule_i, alt_i, alt, step_i + 1)
+            }
+        }
+    }
+
+def emit_optional_item_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, item_i: i64, atom: IrAtom): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_item_fn_name(out, rule_i, alt_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult =\n")
+    let _ = emit_indent(out, 1)
+    let _ = str_push_cstr(out, "match ")
+    let _ = emit_atom_parse_expr(out, rules, atom)
+    let _ = str_push_cstr(out, " {\n")
+    let _ = emit_line_cstr(out, 2, c"MatchOK(v, pos1) => {")
+    let _ = emit_line_cstr(out, 3, c"let some_v: Option[i64] = Some(v)")
+    let _ = emit_line_cstr(out, 3, c"MatchOK(some_v as i64, pos1)")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 2, c"MatchFail => {")
+    let _ = emit_line_cstr(out, 3, c"let none_v: Option[i64] = None")
+    let _ = emit_line_cstr(out, 3, c"MatchOK(none_v as i64, pos)")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_many_helper_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, item_i: i64, atom: IrAtom, min_count: i64, max_count: i64): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_many_fn_name(out, rule_i, alt_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, acc: Vec, count: i64): MatchResult = {\n")
+    let _ = if max_count >= 0 {
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "if count >= ")
+        let _ = emit_i64(out, max_count)
+        let _ = str_push_cstr(out, " { MatchOK(acc as i64, pos) }\n")
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "else {\n")
+        let _ = emit_indent(out, 2)
+        let _ = str_push_cstr(out, "match ")
+        let _ = emit_atom_parse_expr(out, rules, atom)
+        let _ = str_push_cstr(out, " {\n")
+        let _ = emit_line_cstr(out, 3, c"MatchOK(v, pos1) => {")
+        let _ = emit_line_cstr(out, 4, c"if pos1 == pos { MatchOK(acc as i64, pos) }")
+        let _ = emit_line_cstr(out, 4, c"else {")
+        let _ = emit_line_cstr(out, 5, c"let _ = vec_push(acc, v)")
+        let _ = emit_indent(out, 5)
+        let _ = emit_many_fn_name(out, rule_i, alt_i, item_i)
+        let _ = str_push_cstr(out, "(tokens, pos1, acc, count + 1)\n")
+        let _ = emit_line_cstr(out, 4, c"}")
+        let _ = emit_line_cstr(out, 3, c"}")
+        let _ = if min_count <= 0 { emit_line_cstr(out, 3, c"MatchFail => MatchOK(acc as i64, pos)") }
+                else {
+                    let _ = emit_indent(out, 3)
+                    let _ = str_push_cstr(out, "MatchFail => if count >= ")
+                    let _ = emit_i64(out, min_count)
+                    let _ = str_push_cstr(out, " { MatchOK(acc as i64, pos) } else { MatchFail }\n")
+                    0
+                }
+        let _ = emit_line_cstr(out, 2, c"}")
+        let _ = emit_line_cstr(out, 1, c"}")
+        0
+    } else {
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "match ")
+        let _ = emit_atom_parse_expr(out, rules, atom)
+        let _ = str_push_cstr(out, " {\n")
+        let _ = emit_line_cstr(out, 2, c"MatchOK(v, pos1) => {")
+        let _ = emit_line_cstr(out, 3, c"if pos1 == pos { MatchOK(acc as i64, pos) }")
+        let _ = emit_line_cstr(out, 3, c"else {")
+        let _ = emit_line_cstr(out, 4, c"let _ = vec_push(acc, v)")
+        let _ = emit_indent(out, 4)
+        let _ = emit_many_fn_name(out, rule_i, alt_i, item_i)
+        let _ = str_push_cstr(out, "(tokens, pos1, acc, count + 1)\n")
+        let _ = emit_line_cstr(out, 3, c"}")
+        let _ = emit_line_cstr(out, 2, c"}")
+        let _ = if min_count <= 0 { emit_line_cstr(out, 2, c"MatchFail => MatchOK(acc as i64, pos)") }
+                else {
+                    let _ = emit_indent(out, 2)
+                    let _ = str_push_cstr(out, "MatchFail => if count >= ")
+                    let _ = emit_i64(out, min_count)
+                    let _ = str_push_cstr(out, " { MatchOK(acc as i64, pos) } else { MatchFail }\n")
+                    0
+                }
+        let _ = emit_line_cstr(out, 1, c"}")
+        0
+    }
+    let _ = emit_line_cstr(out, 0, c"}")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_repeat_item_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, item_i: i64, atom: IrAtom, min_count: i64, max_count: i64): i64 = {
+    let _ = emit_many_helper_fn(out, rules, rule_i, alt_i, item_i, atom, min_count, max_count)
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_item_fn_name(out, rule_i, alt_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = ")
+    let _ = emit_many_fn_name(out, rule_i, alt_i, item_i)
+    let _ = str_push_cstr(out, "(tokens, pos, vec_new(), 0)\n\n")
+    0
+}
+
+def emit_one_item_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, item_i: i64, atom: IrAtom): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_item_fn_name(out, rule_i, alt_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = ")
+    let _ = emit_atom_parse_expr(out, rules, atom)
+    let _ = str_push_cstr(out, "\n\n")
+    0
+}
+
+def emit_item_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, item_i: i64, item: IrItem): i64 =
+    match item {
+        IrItem(_, atom, q) => {
+            match q {
+                IrQOne => emit_one_item_fn(out, rules, rule_i, alt_i, item_i, atom)
+                IrQOptional => emit_optional_item_fn(out, rules, rule_i, alt_i, item_i, atom)
+                IrQZeroOrMore => emit_repeat_item_fn(out, rules, rule_i, alt_i, item_i, atom, 0, 0 - 1)
+                IrQOneOrMore => emit_repeat_item_fn(out, rules, rule_i, alt_i, item_i, atom, 1, 0 - 1)
+                IrQRange(lo, hi) => emit_repeat_item_fn(out, rules, rule_i, alt_i, item_i, atom, lo, hi)
+            }
+        }
+    }
+
+def emit_item_fns(out: Str, rules: Vec, rule_i: i64, alt_i: i64, items: Vec, i: i64): i64 =
+    if i >= vec_len(items) { 0 }
+    else {
+        let item = vec_get(items, i) as IrItem
+        let _ = emit_item_fn(out, rules, rule_i, alt_i, i, item)
+        emit_item_fns(out, rules, rule_i, alt_i, items, i + 1)
+    }
+
+def emit_alt_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, alt: IrAlt): i64 =
+    match alt {
+        IrAlt(items, _) => {
+            let _ = emit_item_fns(out, rules, rule_i, alt_i, items, 0)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_alt_fn_name(out, rule_i, alt_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = ")
+            let _ = emit_step_fn_name(out, rule_i, alt_i, 0)
+            let _ = str_push_cstr(out, "(tokens, pos)\n\n")
+            emit_step_fn(out, rules, rule_i, alt_i, alt, 0)
+        }
+    }
+
+def emit_alt_fns(out: Str, rules: Vec, rule_i: i64, alts: Vec, alt_i: i64): i64 =
+    if alt_i >= vec_len(alts) { 0 }
+    else {
+        let alt = vec_get(alts, alt_i) as IrAlt
+        let _ = emit_alt_fn(out, rules, rule_i, alt_i, alt)
+        emit_alt_fns(out, rules, rule_i, alts, alt_i + 1)
+    }
+
+def emit_rule_alt_dispatch(out: Str, rule_i: i64, alts: Vec, alt_i: i64): i64 =
+    if alt_i >= vec_len(alts) { emit_line_cstr(out, 1, c"MatchFail") }
+    else {
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "match ")
+        let _ = emit_alt_fn_name(out, rule_i, alt_i)
+        let _ = str_push_cstr(out, "(tokens, pos) {\n")
+        let _ = emit_line_cstr(out, 2, c"MatchOK(ast, pos1) => MatchOK(ast, pos1)")
+        if alt_i + 1 >= vec_len(alts) {
+            let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
+            let _ = emit_line_cstr(out, 1, c"}")
+            let _ = str_push(out, 10)
+            0
+        } else {
+            let _ = emit_indent(out, 2)
+            let _ = str_push_cstr(out, "MatchFail =>\n")
+            let _ = emit_rule_alt_dispatch(out, rule_i, alts, alt_i + 1)
+            let _ = emit_line_cstr(out, 1, c"}")
+            let _ = str_push(out, 10)
+            0
+        }
+    }
+
+def emit_rule_body_fn(out: Str, rules: Vec, rule_i: i64, rule: IrRule): i64 =
+    match ir_rule_body(rule) {
+        IrBodyAlts(alts) => {
+            let _ = emit_alt_fns(out, rules, rule_i, alts, 0)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_rule_fn_name(out, rule_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult =\n")
+            emit_rule_alt_dispatch(out, rule_i, alts, 0)
+        }
+        IrBodyPratt(_) => {
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_rule_fn_name(out, rule_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = MatchFail\n\n")
+            0
+        }
+    }
+
+def emit_rule_fns(out: Str, rules: Vec, rule_i: i64): i64 =
+    if rule_i >= vec_len(rules) { 0 }
+    else {
+        let rule = vec_get(rules, rule_i) as IrRule
+        let _ = emit_rule_body_fn(out, rules, rule_i, rule)
+        emit_rule_fns(out, rules, rule_i + 1)
+    }
+
+def emit_support_prelude(out: Str, file: FileAst): i64 = {
+    if file_header(file).len > 0 { emit_raw_block(out, file_header(file)) }
+    else { emit_line_cstr(out, 0, c"namespace generated.parser") }
+}
+
+def emit_support_imports(out: Str): i64 = {
+    let _ = emit_line_cstr(out, 0, c"use metalstd.mem.*")
+    let _ = emit_line_cstr(out, 0, c"use metalstd.str.*")
+    let _ = emit_line_cstr(out, 0, c"use metalstd.vec.*")
+    let _ = emit_line_cstr(out, 0, c"use metalstd.option.*")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_support_types(out: Str): i64 = {
+    let _ = emit_line_cstr(out, 0, c"data MatchResult {")
+    let _ = emit_line_cstr(out, 1, c"MatchOK(i64, i64),")
+    let _ = emit_line_cstr(out, 1, c"MatchFail")
+    let _ = emit_line_cstr(out, 0, c"}")
+    let _ = str_push(out, 10)
+    let _ = emit_line_cstr(out, 0, c"data LabeledAST {")
+    let _ = emit_line_cstr(out, 1, c"OK(i64, Vec),")
+    let _ = emit_line_cstr(out, 1, c"Err(Option[i64], Vec)")
+    let _ = emit_line_cstr(out, 0, c"}")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_support_helpers(out: Str): i64 = {
+    let _ = emit_line_cstr(out, 0, c"def is_space_byte(b: i64): i64 =")
+    let _ = emit_line_cstr(out, 1, c"if b == 32 { 1 }")
+    let _ = emit_line_cstr(out, 1, c"else if b == 10 { 1 }")
+    let _ = emit_line_cstr(out, 1, c"else if b == 9 { 1 }")
+    let _ = emit_line_cstr(out, 1, c"else if b == 13 { 1 }")
+    let _ = emit_line_cstr(out, 1, c"else { 0 }")
+    let _ = str_push(out, 10)
+    let _ = emit_line_cstr(out, 0, c"def source_token_tags(src: Str): Vec =")
+    let _ = emit_line_cstr(out, 1, c"source_token_tags_loop(src, 0, 0 - 1, vec_new())")
+    let _ = str_push(out, 10)
+    let _ = emit_line_cstr(out, 0, c"def source_token_tags_loop(src: Str, i: i64, start: i64, out: Vec): Vec =")
+    let _ = emit_line_cstr(out, 1, c"if i >= src.len {")
+    let _ = emit_line_cstr(out, 2, c"let _ = if start >= 0 { vec_push(out, mk_str(src.ptr + start, i - start) as i64) } else { 0 }")
+    let _ = emit_line_cstr(out, 2, c"out")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = emit_line_cstr(out, 1, c"else {")
+    let _ = emit_line_cstr(out, 2, c"let b = load8(src.ptr, i)")
+    let _ = emit_line_cstr(out, 2, c"if is_space_byte(b) != 0 {")
+    let _ = emit_line_cstr(out, 3, c"let _ = if start >= 0 { vec_push(out, mk_str(src.ptr + start, i - start) as i64) } else { 0 }")
+    let _ = emit_line_cstr(out, 3, c"source_token_tags_loop(src, i + 1, 0 - 1, out)")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 2, c"else {")
+    let _ = emit_line_cstr(out, 3, c"let start1 = if start >= 0 { start } else { i }")
+    let _ = emit_line_cstr(out, 3, c"source_token_tags_loop(src, i + 1, start1, out)")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = str_push(out, 10)
+    let _ = emit_line_cstr(out, 0, c"def token_prefix(tokens: Vec, n: i64): Vec =")
+    let _ = emit_line_cstr(out, 1, c"token_prefix_loop(tokens, 0, n, vec_new())")
+    let _ = str_push(out, 10)
+    let _ = emit_line_cstr(out, 0, c"def token_prefix_loop(tokens: Vec, i: i64, n: i64, out: Vec): Vec =")
+    let _ = emit_line_cstr(out, 1, c"if i >= n || i >= vec_len(tokens) { out }")
+    let _ = emit_line_cstr(out, 1, c"else {")
+    let _ = emit_line_cstr(out, 2, c"let _ = vec_push(out, vec_get(tokens, i))")
+    let _ = emit_line_cstr(out, 2, c"token_prefix_loop(tokens, i + 1, n, out)")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = str_push(out, 10)
+    let _ = emit_line_cstr(out, 0, c"def match_token(tokens: Vec, pos: i64, want: Str): MatchResult =")
+    let _ = emit_line_cstr(out, 1, c"if pos < vec_len(tokens) {")
+    let _ = emit_line_cstr(out, 2, c"let tok = vec_get(tokens, pos) as Str")
+    let _ = emit_line_cstr(out, 2, c"if (tok as i64) != 0 && streq(tok, want) != 0 { MatchOK(want as i64, pos + 1) }")
+    let _ = emit_line_cstr(out, 2, c"else { MatchFail }")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = emit_line_cstr(out, 1, c"else { MatchFail }")
+    let _ = str_push(out, 10)
+    let _ = emit_line_cstr(out, 0, c"def match_eof(tokens: Vec, pos: i64): MatchResult =")
+    let _ = emit_line_cstr(out, 1, c"if pos == vec_len(tokens) { MatchOK(mk_str(\"Eof\", 3) as i64, pos) }")
+    let _ = emit_line_cstr(out, 1, c"else { MatchFail }")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_start_fn(out: Str, ir: GrammarIr): i64 = {
+    let start_idx = find_rule_index(ir_rules(ir), ir_start_rule(ir))
+    let _ = emit_line_cstr(out, 0, c"def parse_source(src: Str): LabeledAST = {")
+    let _ = emit_line_cstr(out, 1, c"let tokens = source_token_tags(src)")
+    let _ = emit_indent(out, 1)
+    let _ = str_push_cstr(out, "match ")
+    let _ = if start_idx >= 0 { emit_rule_fn_name(out, start_idx) } else { str_push_cstr(out, "match_eof") }
+    let _ = str_push_cstr(out, "(tokens, 0) {\n")
+    let _ = emit_line_cstr(out, 2, c"MatchOK(ast, pos) => {")
+    let _ = emit_line_cstr(out, 3, c"if pos == vec_len(tokens) { OK(ast, token_prefix(tokens, pos)) }")
+    let _ = emit_line_cstr(out, 3, c"else { Err(Some(ast), token_prefix(tokens, pos)) }")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 2, c"MatchFail => Err(None, vec_new())")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = emit_line_cstr(out, 0, c"}")
+    let _ = str_push(out, 10)
+    0
+}
+
+def codegen_parser(file: FileAst, ir: GrammarIr): Str = {
     let out = str_new()
-    let _ = str_push_cstr(out, "// chibacc M0 skeleton")
-    let _ = str_push(out, 10)
-    let _ = str_push_cstr(out, "// start rule: ")
-    let _ = str_append(out, ir_start_rule(ir))
-    let _ = str_push(out, 10)
+    let _ = emit_support_prelude(out, file)
+    let _ = emit_support_imports(out)
+    let _ = if file_footer(file).len > 0 { emit_raw_block(out, file_footer(file)) } else { 0 }
+    let _ = emit_support_types(out)
+    let _ = emit_support_helpers(out)
+    let _ = emit_rule_fns(out, ir_rules(ir), 0)
+    let _ = emit_start_fn(out, ir)
     out
 }

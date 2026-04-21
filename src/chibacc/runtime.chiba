@@ -1,12 +1,237 @@
 namespace chibacc.runtime
+use metalstd.mem.*
+use metalstd.str.*
 use metalstd.vec.*
 use metalstd.option.*
+use chibacc.ir.*
 
-// M0 skeleton runtime result wrapper.
+// M2 debug runtime for ordinary rules. This interprets the normalized IR over a
+// whitespace-separated token-tag stream. It does not execute user actions yet;
+// actions are preserved as debug text on the resulting tree.
+
+data DebugAST {
+    DebugNode(Str, Vec, Str),
+    DebugToken(Str)
+}
 
 data LabeledAST {
-    OK(i64, Vec),
-    Err(Option[i64], Vec)
+    OK(DebugAST, Vec),
+    Err(Option[DebugAST], Vec)
 }
 
 def empty_consumed_tokens(): Vec = vec_new()
+
+def is_space_byte(b: i64): i64 =
+    if b == 32 { 1 }
+    else if b == 10 { 1 }
+    else if b == 9 { 1 }
+    else if b == 13 { 1 }
+    else { 0 }
+
+def source_token_tags(src: Str): Vec =
+    source_token_tags_loop(src, 0, 0 - 1, vec_new())
+
+def source_token_tags_loop(src: Str, i: i64, start: i64, out: Vec): Vec =
+    if i >= src.len {
+        let _ = if start >= 0 { vec_push(out, mk_str(src.ptr + start, i - start) as i64) } else { 0 }
+        out
+    }
+    else {
+        let b = load8(src.ptr, i)
+        if is_space_byte(b) != 0 {
+            let _ = if start >= 0 { vec_push(out, mk_str(src.ptr + start, i - start) as i64) } else { 0 }
+            source_token_tags_loop(src, i + 1, 0 - 1, out)
+        }
+        else {
+            let start1 = if start >= 0 { start } else { i }
+            source_token_tags_loop(src, i + 1, start1, out)
+        }
+    }
+
+def rule_name_is_token(name: Str): i64 =
+    if name.len <= 0 { 0 }
+    else {
+        let ch = load8(name.ptr, 0)
+        if ch >= 65 && ch <= 90 { 1 } else { 0 }
+    }
+
+def token_prefix(tokens: Vec, n: i64): Vec =
+    token_prefix_loop(tokens, 0, n, vec_new())
+
+def token_prefix_loop(tokens: Vec, i: i64, n: i64, out: Vec): Vec =
+    if i >= n || i >= vec_len(tokens) { out }
+    else {
+        let _ = vec_push(out, vec_get(tokens, i))
+        token_prefix_loop(tokens, i + 1, n, out)
+    }
+
+def find_rule_named(rules: Vec, name: Str): Option[IrRule] =
+    find_rule_named_loop(rules, name, 0)
+
+def find_rule_named_loop(rules: Vec, name: Str, i: i64): Option[IrRule] =
+    if (name as i64) == 0 { None }
+    else if i >= vec_len(rules) { None }
+    else {
+        let rule = vec_get(rules, i) as IrRule
+        let rule_name = ir_rule_name(rule)
+        if (rule_name as i64) != 0 && streq(rule_name, name) != 0 { Some(rule) }
+        else { find_rule_named_loop(rules, name, i + 1) }
+    }
+
+def parse_atom(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+    match atom {
+        IrAtomRef(name) => {
+            if (name as i64) == 0 { None }
+            else if streq(name, mk_str("Eof", 3)) != 0 {
+                if pos == vec_len(tokens) { Some((DebugToken(name), pos)) } else { None }
+            }
+            else if rule_name_is_token(name) != 0 {
+                if pos < vec_len(tokens) {
+                    let tok = vec_get(tokens, pos) as Str
+                    if (tok as i64) != 0 && streq(tok, name) != 0 {
+                        Some((DebugToken(name), pos + 1))
+                    } else { None }
+                } else { None }
+            }
+            else {
+                parse_rule_named(ir, name, tokens, pos)
+            }
+        }
+        IrAtomPredicate(_) => None
+        IrAtomLookAnd(_) => None
+        IrAtomLookNot(_) => None
+    }
+
+def push_all_children(dst: Vec, src: Vec): i64 =
+    push_all_children_loop(dst, src, 0)
+
+def push_all_children_loop(dst: Vec, src: Vec, i: i64): i64 =
+    if i >= vec_len(src) { 0 }
+    else {
+        let _ = vec_push(dst, vec_get(src, i))
+        push_all_children_loop(dst, src, i + 1)
+    }
+
+def parse_item(ir: GrammarIr, item: IrItem, tokens: Vec, pos: i64): Option[(Vec, i64)] =
+    match item {
+        IrItem(_, atom, q) => parse_quantified_atom(ir, atom, q, tokens, pos)
+    }
+
+def parse_quantified_atom(ir: GrammarIr, atom: IrAtom, q: IrQuantifier, tokens: Vec, pos: i64): Option[(Vec, i64)] =
+    match q {
+        IrQOne => {
+            match parse_atom(ir, atom, tokens, pos) {
+                Some((node, pos1)) => {
+                    let out = vec_new()
+                    let _ = vec_push(out, node as i64)
+                    Some((out, pos1))
+                }
+                None => None
+            }
+        }
+        IrQOptional => {
+            match parse_atom(ir, atom, tokens, pos) {
+                Some((node, pos1)) => {
+                    let out = vec_new()
+                    let _ = vec_push(out, node as i64)
+                    Some((out, pos1))
+                }
+                None => Some((vec_new(), pos))
+            }
+        }
+        IrQZeroOrMore => Some(parse_many_atom(ir, atom, tokens, pos, 0))
+        IrQOneOrMore => {
+            let (nodes, pos1, count) = parse_many_atom(ir, atom, tokens, pos, 0)
+            if count > 0 { Some((nodes, pos1)) } else { None }
+        }
+        IrQRange(lo, hi) => {
+            let (nodes, pos1, count) = parse_many_atom_bound(ir, atom, tokens, pos, 0, hi)
+            if count >= lo { Some((nodes, pos1)) } else { None }
+        }
+    }
+
+def parse_many_atom(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64): (Vec, i64, i64) =
+    parse_many_atom_loop(ir, atom, tokens, pos, count, vec_new())
+
+def parse_many_atom_loop(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64, out: Vec): (Vec, i64, i64) =
+    match parse_atom(ir, atom, tokens, pos) {
+        Some((node, pos1)) => {
+            if pos1 == pos {
+                let __r = (out, pos, count)
+                __r
+            }
+            else {
+                let _ = vec_push(out, node as i64)
+                parse_many_atom_loop(ir, atom, tokens, pos1, count + 1, out)
+            }
+        }
+        None => {
+            let __r = (out, pos, count)
+            __r
+        }
+    }
+
+def parse_many_atom_bound(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64, hi: i64): (Vec, i64, i64) =
+    if hi >= 0 && count >= hi {
+        let __r = (vec_new(), pos, count)
+        __r
+    }
+    else {
+        let (out, pos1, count1) = parse_many_atom(ir, atom, tokens, pos, count)
+        let __r = (out, pos1, count1)
+        __r
+    }
+
+def parse_alt(ir: GrammarIr, rule_name: Str, alt: IrAlt, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+    match alt {
+        IrAlt(items, action) => {
+            match parse_alt_items(ir, items, tokens, pos, 0, vec_new()) {
+                Some((children, pos1)) => Some((DebugNode(rule_name, children, action), pos1))
+                None => None
+            }
+        }
+    }
+
+def parse_alt_items(ir: GrammarIr, items: Vec, tokens: Vec, pos: i64, i: i64, children: Vec): Option[(Vec, i64)] =
+    if i >= vec_len(items) { Some((children, pos)) }
+    else {
+        let item = vec_get(items, i) as IrItem
+        match parse_item(ir, item, tokens, pos) {
+            Some((nodes, pos1)) => {
+                let _ = push_all_children(children, nodes)
+                parse_alt_items(ir, items, tokens, pos1, i + 1, children)
+            }
+            None => None
+        }
+    }
+
+def parse_rule_named(ir: GrammarIr, name: Str, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+    match find_rule_named(ir_rules(ir), name) {
+        None => None
+        Some(rule) => parse_rule(ir, rule, tokens, pos)
+    }
+
+def parse_rule(ir: GrammarIr, rule: IrRule, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+    match ir_rule_body(rule) {
+        IrBodyAlts(alts) => parse_rule_alts(ir, ir_rule_name(rule), alts, tokens, pos, 0)
+        IrBodyPratt(_) => None
+    }
+
+def parse_rule_alts(ir: GrammarIr, rule_name: Str, alts: Vec, tokens: Vec, pos: i64, i: i64): Option[(DebugAST, i64)] =
+    if i >= vec_len(alts) { None }
+    else {
+        let alt = vec_get(alts, i) as IrAlt
+        match parse_alt(ir, rule_name, alt, tokens, pos) {
+            Some(res) => Some(res)
+            None => parse_rule_alts(ir, rule_name, alts, tokens, pos, i + 1)
+        }
+    }
+
+def run_start_rule(ir: GrammarIr, tokens: Vec): LabeledAST =
+    match parse_rule_named(ir, ir_start_rule(ir), tokens, 0) {
+        Some((ast, pos)) => {
+            if pos == vec_len(tokens) { OK(ast, token_prefix(tokens, pos)) }
+            else { Err(Some(ast), token_prefix(tokens, pos)) }
+        }
+        None => Err(None, empty_consumed_tokens())
+    }

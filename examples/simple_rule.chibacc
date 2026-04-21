@@ -1,0 +1,11 @@
+#![CHIBACC]
+{
+    namespace parser.simple
+}
+start programme
+rule programme ::= Minus Eof => Programme() ;
+{
+    data AST {
+        Programme()
+    }
+}

@@ -1,0 +1,22 @@
+#![CHIBACC]
+{
+    namespace parser.ordinary
+    use metalstd.option.*
+}
+start programme
+rule programme ::= items:item* Eof => Programme(items) ;
+rule item ::= maybe:Minus? body:atom => Item(has_token(maybe), body) ;
+rule atom ::= Plus => Atom_Plus() ;
+{
+    data AST {
+        Programme(Vec),
+        Item(i64, AST),
+        Atom_Plus()
+    }
+
+    def has_token(opt: Option[i64]): i64 =
+        match opt {
+            Some(_) => 1
+            None => 0
+        }
+}

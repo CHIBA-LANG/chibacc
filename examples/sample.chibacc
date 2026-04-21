@@ -1,11 +1,29 @@
 #![CHIBACC]
 {
-    namespace parser.sample
+    namespace parser.chiba
+    use frontend.ast.*
+    use frontend.token.*
 }
 start programme
 rule programme ::= items:item* Eof => Programme(items) ;
+rule item ::= attrs:item_attr* priv:KwPrivate? body:item_body => Item(attrs, priv != None, body) ;
 rule expr ::= pratt {
-    prefix(20) {
-        Minus e:expr => Expr_UnOp(Neg, e) ;
+    prefix (20) {
+        Neg e:expr => Expr_UnOp(Neg, e) ;
+        Pos e:expr => Expr_PosOp(Pos, e) ;
+    }
+    postfix(70) {
+        Dot name:Ident => Expr_Field($lhs, name) ;
+    }
+    infix(50, 51) {
+        Slash rhs:expr => Expr_BinOp(Div, $lhs, rhs) ;
+    }
+    infix(40, 41) {
+        Plus rhs:expr => Expr_BinOp(Add, $lhs, rhs) ;
     }
 } ;
+{
+    data AST {
+        Programme(Vec)
+    }
+}

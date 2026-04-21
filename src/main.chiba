@@ -1,0 +1,136 @@
+namespace main
+use metalstd.mem.*
+use metalstd.file.*
+use metalstd.option.*
+use metalstd.str.*
+use metalstd.print.*
+use metalstd.vec.*
+use chibacc.ast.*
+use chibacc.show.*
+use chibacc.lexer.*
+use chibacc.parser.*
+use chibacc.lower.*
+use chibacc.codegen.*
+
+data CliArgs {
+    CliArgs(Str, Str, Str)
+}
+
+def argv_cstr(argv: i64, i: i64): i64 = load64(argv, i)
+
+def argv_str(argv: i64, i: i64): Str = str_from_cptr(argv_cstr(argv, i))
+
+def cli_grammar_path(args: CliArgs): Str =
+    match args {
+        CliArgs(grammar_path, _, _) => grammar_path
+    }
+
+def cli_source_path(args: CliArgs): Str =
+    match args {
+        CliArgs(_, source_path, _) => source_path
+    }
+
+def cli_output_path(args: CliArgs): Str =
+    match args {
+        CliArgs(_, _, output_path) => output_path
+    }
+
+def print_usage(): i64 = {
+    let _ = write_fd(1, "Usage: chibacc <grammar.chibacc> [source.xxx] -o <ast.txt>\n", 60)
+    1
+}
+
+def parse_args(argc: i64, argv: i64): Option[CliArgs] = {
+    if argc == 4 {
+        let grammar_path = argv_str(argv, 1)
+        let flag = argv_str(argv, 2)
+        let output_path = argv_str(argv, 3)
+        if streq(flag, mk_str("-o", 2)) != 0 { Some(CliArgs(grammar_path, str_new(), output_path)) }
+        else { None }
+    }
+    else if argc == 5 {
+        let grammar_path = argv_str(argv, 1)
+        let source_path = argv_str(argv, 2)
+        let flag = argv_str(argv, 3)
+        let output_path = argv_str(argv, 4)
+        if streq(flag, mk_str("-o", 2)) != 0 { Some(CliArgs(grammar_path, source_path, output_path)) }
+        else { None }
+    }
+    else { None }
+}
+
+def append_source_info(out: Str, source_path: Str): i64 = {
+    if source_path.len == 0 { 0 }
+    else {
+        let src = file_read_file_all_sized(str_to_cstr(source_path))
+        let _ = str_push_cstr(out, "source_path: ")
+        let _ = str_append(out, source_path)
+        let _ = str_push(out, 10)
+        let _ = str_push_cstr(out, "source_size: ")
+        let _ = str_append_i64(out, src.len)
+        let _ = str_push(out, 10)
+        0
+    }
+}
+
+// M1 entrypoint: read a real `.chibacc` file and dump its parsed AST.
+
+def run_debug(args: CliArgs): i64 = {
+    let grammar_path = cli_grammar_path(args)
+    let source_path = cli_source_path(args)
+    let output_path = cli_output_path(args)
+    let src = file_read_file_all_sized(str_to_cstr(grammar_path))
+    if src.len == 0 {
+        let _ = write_fd(2, "[chibacc] could not read grammar file\n", 38)
+        1
+    } else {
+        let toks = lex_chibacc(src)
+        let parsed = parse_file(src, toks)
+    match parsed {
+        None => {
+            let _ = write_fd(2, "[chibacc] M1 parse failed\n", 26)
+            1
+        }
+        Some(file) => {
+            let ir = lower_file(file)
+            let generated = codegen_parser(ir)
+            let ast_dump = show_file_ast(file)
+            let out = str_new()
+            let _ = str_push_cstr(out, "grammar_path: ")
+            let _ = str_append(out, grammar_path)
+            let _ = str_push(out, 10)
+            let _ = append_source_info(out, source_path)
+            let _ = str_push_cstr(out, "token_count: ")
+            let _ = str_append_i64(out, vec_len(toks))
+            let _ = str_push(out, 10)
+            let _ = str_push_cstr(out, "rule_count: ")
+            let _ = str_append_i64(out, vec_len(file_rules(file)))
+            let _ = str_push(out, 10)
+            let _ = str_push(out, 10)
+            let _ = str_push_cstr(out, "== AST ==\n")
+            let _ = str_append(out, ast_dump)
+            let _ = str_push(out, 10)
+            let _ = str_push_cstr(out, "== Lower / Codegen Preview ==\n")
+            let _ = str_append(out, generated)
+            let res = file_write_file_all(str_to_cstr(output_path), out)
+            if res < 0 {
+                let _ = write_fd(2, "[chibacc] could not write debug output\n", 40)
+                1
+            } else {
+                let _ = write_fd(1, "[chibacc] wrote AST debug output\n", 33)
+                0
+            }
+        }
+        }
+    }
+}
+
+#[entry]
+def main(argc: i64, argv: i64): i64 = {
+    let parsed = parse_args(argc, argv)
+    let code = match parsed {
+        Some(args) => run_debug(args)
+        None => print_usage()
+    }
+    exit(code)
+}

@@ -1,0 +1,18 @@
+namespace chibacc.ir
+use metalstd.str.*
+use metalstd.vec.*
+
+// M0 skeleton for normalized grammar IR.
+
+data RuleIr {
+    RuleIr(Str, Vec)
+}
+
+data GrammarIr {
+    GrammarIr(Str, Vec)
+}
+
+def ir_start_rule(ir: GrammarIr): Str =
+    match ir {
+        GrammarIr(start_rule, _) => start_rule
+    }

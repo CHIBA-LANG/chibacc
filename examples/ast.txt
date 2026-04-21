@@ -1,0 +1,59 @@
+grammar_path: chibacc/examples/sample.chibacc
+source_path: chibacc/examples/source.sample
+source_size: 9
+token_count: 49
+rule_count: 2
+
+== AST ==
+FileAst
+  start: programme
+  header:
+    
+    namespace parser.sample
+
+  rules:
+    RuleDef
+      name: programme
+      body:
+        BodyAlts
+          Alt
+            items:
+              SeqItem
+                label: items
+                quantifier: zero_or_more
+                atom:
+                  AtomRef: item
+              SeqItem
+                label: <none>
+                quantifier: one
+                atom:
+                  AtomRef: Eof
+            action: Programme(items) 
+    RuleDef
+      name: expr
+      body:
+        BodyPratt
+          prefixes:
+            PrefixBlock
+              binding_power: 20
+              PrattArm
+                items:
+                  SeqItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      AtomRef: Minus
+                  SeqItem
+                    label: e
+                    quantifier: one
+                    atom:
+                      AtomRef: expr
+                action: Expr_UnOp(Neg, e) 
+          infixes:
+          postfixes:
+  footer:
+    <empty>
+
+== Lower / Codegen Preview ==
+// chibacc M0 skeleton
+// start rule: programme

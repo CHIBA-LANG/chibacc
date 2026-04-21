@@ -1,0 +1,12 @@
+namespace chibacc.runtime
+use metalstd.vec.*
+use metalstd.option.*
+
+// M0 skeleton runtime result wrapper.
+
+data LabeledAST {
+    OK(i64, Vec),
+    Err(Option[i64], Vec)
+}
+
+def empty_consumed_tokens(): Vec = vec_new()

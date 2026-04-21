@@ -1,0 +1,15 @@
+namespace chibacc.codegen
+use metalstd.str.*
+use chibacc.ir.*
+
+// M0 skeleton code generator.
+
+def codegen_parser(ir: GrammarIr): Str = {
+    let out = str_new()
+    let _ = str_push_cstr(out, "// chibacc M0 skeleton")
+    let _ = str_push(out, 10)
+    let _ = str_push_cstr(out, "// start rule: ")
+    let _ = str_append(out, ir_start_rule(ir))
+    let _ = str_push(out, 10)
+    out
+}

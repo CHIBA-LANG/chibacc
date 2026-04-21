@@ -1,0 +1,11 @@
+#![CHIBACC]
+{
+    namespace parser.sample
+}
+start programme
+rule programme ::= items:item* Eof => Programme(items) ;
+rule expr ::= pratt {
+    prefix(20) {
+        Minus e:expr => Expr_UnOp(Neg, e) ;
+    }
+} ;

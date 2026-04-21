@@ -1,0 +1,9 @@
+namespace chibacc.lower
+use metalstd.vec.*
+use chibacc.ast.*
+use chibacc.ir.*
+
+// M0 skeleton lowering pass.
+
+def lower_file(file: FileAst): GrammarIr =
+    GrammarIr(file_start_rule(file), vec_new())

@@ -1,15 +1,19 @@
 grammar_path: chibacc/examples/sample.chibacc
 source_path: chibacc/examples/source.sample
 source_size: 9
-token_count: 49
-rule_count: 2
+source_token_count: 1
+source_status: interpreted as whitespace-separated token tags for M2 debug runtime
+token_count: 175
+rule_count: 3
 
-== AST ==
+== Grammar AST ==
 FileAst
   start: programme
   header:
     
-    namespace parser.sample
+    namespace parser.chiba
+    use frontend.ast.*
+    use frontend.token.*
 
   rules:
     RuleDef
@@ -30,6 +34,28 @@ FileAst
                   AtomRef: Eof
             action: Programme(items) 
     RuleDef
+      name: item
+      body:
+        BodyAlts
+          Alt
+            items:
+              SeqItem
+                label: attrs
+                quantifier: zero_or_more
+                atom:
+                  AtomRef: item_attr
+              SeqItem
+                label: priv
+                quantifier: optional
+                atom:
+                  AtomRef: KwPrivate
+              SeqItem
+                label: body
+                quantifier: one
+                atom:
+                  AtomRef: item_body
+            action: Item(attrs, priv != None, body) 
+    RuleDef
       name: expr
       body:
         BodyPratt
@@ -42,18 +68,365 @@ FileAst
                     label: <none>
                     quantifier: one
                     atom:
-                      AtomRef: Minus
+                      AtomRef: Neg
                   SeqItem
                     label: e
                     quantifier: one
                     atom:
                       AtomRef: expr
                 action: Expr_UnOp(Neg, e) 
+              PrattArm
+                items:
+                  SeqItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      AtomRef: Pos
+                  SeqItem
+                    label: e
+                    quantifier: one
+                    atom:
+                      AtomRef: expr
+                action: Expr_PosOp(Pos, e) 
           infixes:
+            InfixBlock
+              binding_power: 50 -> 51
+              PrattArm
+                items:
+                  SeqItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      AtomRef: Slash
+                  SeqItem
+                    label: rhs
+                    quantifier: one
+                    atom:
+                      AtomRef: expr
+                action: Expr_BinOp(Div, $lhs, rhs) 
+            InfixBlock
+              binding_power: 40 -> 41
+              PrattArm
+                items:
+                  SeqItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      AtomRef: Plus
+                  SeqItem
+                    label: rhs
+                    quantifier: one
+                    atom:
+                      AtomRef: expr
+                action: Expr_BinOp(Add, $lhs, rhs) 
           postfixes:
+            PostfixBlock
+              binding_power: 70
+              PrattArm
+                items:
+                  SeqItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      AtomRef: Dot
+                  SeqItem
+                    label: name
+                    quantifier: one
+                    atom:
+                      AtomRef: Ident
+                action: Expr_Field($lhs, name) 
   footer:
-    <empty>
+    
+    data AST {
+        Programme(Vec)
+    }
 
-== Lower / Codegen Preview ==
-// chibacc M0 skeleton
-// start rule: programme
+
+== Grammar IR ==
+GrammarIr
+  start: programme
+  rules:
+    IrRule
+      name: programme
+      synthetic: no
+      body:
+        IrBodyAlts
+          IrAlt
+            items:
+              IrItem
+                label: items
+                quantifier: zero_or_more
+                atom:
+                  IrAtomRef: item
+              IrItem
+                label: <none>
+                quantifier: one
+                atom:
+                  IrAtomRef: Eof
+            action: Programme(items) 
+    IrRule
+      name: item
+      synthetic: no
+      body:
+        IrBodyAlts
+          IrAlt
+            items:
+              IrItem
+                label: attrs
+                quantifier: zero_or_more
+                atom:
+                  IrAtomRef: item_attr
+              IrItem
+                label: priv
+                quantifier: optional
+                atom:
+                  IrAtomRef: KwPrivate
+              IrItem
+                label: body
+                quantifier: one
+                atom:
+                  IrAtomRef: item_body
+            action: Item(attrs, priv != None, body) 
+    IrRule
+      name: expr
+      synthetic: no
+      body:
+        IrPrattRule
+          prefixes:
+            IrPrefixBlock
+              binding_power: 20
+              IrAlt
+                items:
+                  IrItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      IrAtomRef: Neg
+                  IrItem
+                    label: e
+                    quantifier: one
+                    atom:
+                      IrAtomRef: expr
+                action: Expr_UnOp(Neg, e) 
+              IrAlt
+                items:
+                  IrItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      IrAtomRef: Pos
+                  IrItem
+                    label: e
+                    quantifier: one
+                    atom:
+                      IrAtomRef: expr
+                action: Expr_PosOp(Pos, e) 
+          infixes:
+            IrInfixBlock
+              binding_power: 50 -> 51
+              IrAlt
+                items:
+                  IrItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      IrAtomRef: Slash
+                  IrItem
+                    label: rhs
+                    quantifier: one
+                    atom:
+                      IrAtomRef: expr
+                action: Expr_BinOp(Div, $lhs, rhs) 
+            IrInfixBlock
+              binding_power: 40 -> 41
+              IrAlt
+                items:
+                  IrItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      IrAtomRef: Plus
+                  IrItem
+                    label: rhs
+                    quantifier: one
+                    atom:
+                      IrAtomRef: expr
+                action: Expr_BinOp(Add, $lhs, rhs) 
+          postfixes:
+            IrPostfixBlock
+              binding_power: 70
+              IrAlt
+                items:
+                  IrItem
+                    label: <none>
+                    quantifier: one
+                    atom:
+                      IrAtomRef: Dot
+                  IrItem
+                    label: name
+                    quantifier: one
+                    atom:
+                      IrAtomRef: Ident
+                action: Expr_Field($lhs, name) 
+
+== LabeledAST ==
+LabeledAST.Err
+  ast:
+    <none>
+  consumed:
+
+== Generated Parser Preview ==
+namespace generated.parser
+use metalstd.str.*
+use metalstd.vec.*
+use chibacc.ir.*
+use chibacc.runtime.*
+
+def generated_rule_0_alt_0_items(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, IrItem(mk_str("items", 5), IrAtomRef(mk_str("item", 4)), IrQZeroOrMore) as i64)
+    let _ = vec_push(xs, IrItem(str_empty(), IrAtomRef(mk_str("Eof", 3)), IrQOne) as i64)
+    xs
+}
+
+def generated_rule_0_alt_0(): IrAlt = IrAlt(generated_rule_0_alt_0_items(), mk_str("Programme(items) ", 17))
+
+def generated_rule_0_alts(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_0_alt_0() as i64)
+    xs
+}
+
+def generated_rule_0(): IrRule = IrRule(mk_str("programme", 9), IrBodyAlts(generated_rule_0_alts()), 0)
+
+def generated_rule_1_alt_0_items(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, IrItem(mk_str("attrs", 5), IrAtomRef(mk_str("item_attr", 9)), IrQZeroOrMore) as i64)
+    let _ = vec_push(xs, IrItem(mk_str("priv", 4), IrAtomRef(mk_str("KwPrivate", 9)), IrQOptional) as i64)
+    let _ = vec_push(xs, IrItem(mk_str("body", 4), IrAtomRef(mk_str("item_body", 9)), IrQOne) as i64)
+    xs
+}
+
+def generated_rule_1_alt_0(): IrAlt = IrAlt(generated_rule_1_alt_0_items(), mk_str("Item(attrs, priv != None, body) ", 32))
+
+def generated_rule_1_alts(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_1_alt_0() as i64)
+    xs
+}
+
+def generated_rule_1(): IrRule = IrRule(mk_str("item", 4), IrBodyAlts(generated_rule_1_alts()), 0)
+
+def generated_rule_2_prefix_0_arm_0_items(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, IrItem(str_empty(), IrAtomRef(mk_str("Neg", 3)), IrQOne) as i64)
+    let _ = vec_push(xs, IrItem(mk_str("e", 1), IrAtomRef(mk_str("expr", 4)), IrQOne) as i64)
+    xs
+}
+
+def generated_rule_2_prefix_0_arm_0(): IrAlt = IrAlt(generated_rule_2_prefix_0_arm_0_items(), mk_str("Expr_UnOp(Neg, e) ", 18))
+
+def generated_rule_2_prefix_0_arm_1_items(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, IrItem(str_empty(), IrAtomRef(mk_str("Pos", 3)), IrQOne) as i64)
+    let _ = vec_push(xs, IrItem(mk_str("e", 1), IrAtomRef(mk_str("expr", 4)), IrQOne) as i64)
+    xs
+}
+
+def generated_rule_2_prefix_0_arm_1(): IrAlt = IrAlt(generated_rule_2_prefix_0_arm_1_items(), mk_str("Expr_PosOp(Pos, e) ", 19))
+
+def generated_rule_2_prefix_0_arms(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_2_prefix_0_arm_0() as i64)
+    let _ = vec_push(xs, generated_rule_2_prefix_0_arm_1() as i64)
+    xs
+}
+
+def generated_rule_2_prefix_0(): IrPrefixBlock = IrPrefixBlock(20, generated_rule_2_prefix_0_arms())
+
+def generated_rule_2_infix_0_arm_0_items(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, IrItem(str_empty(), IrAtomRef(mk_str("Slash", 5)), IrQOne) as i64)
+    let _ = vec_push(xs, IrItem(mk_str("rhs", 3), IrAtomRef(mk_str("expr", 4)), IrQOne) as i64)
+    xs
+}
+
+def generated_rule_2_infix_0_arm_0(): IrAlt = IrAlt(generated_rule_2_infix_0_arm_0_items(), mk_str("Expr_BinOp(Div, $lhs, rhs) ", 27))
+
+def generated_rule_2_infix_0_arms(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_2_infix_0_arm_0() as i64)
+    xs
+}
+
+def generated_rule_2_infix_0(): IrInfixBlock = IrInfixBlock(50, 51, generated_rule_2_infix_0_arms())
+
+def generated_rule_2_infix_1_arm_0_items(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, IrItem(str_empty(), IrAtomRef(mk_str("Plus", 4)), IrQOne) as i64)
+    let _ = vec_push(xs, IrItem(mk_str("rhs", 3), IrAtomRef(mk_str("expr", 4)), IrQOne) as i64)
+    xs
+}
+
+def generated_rule_2_infix_1_arm_0(): IrAlt = IrAlt(generated_rule_2_infix_1_arm_0_items(), mk_str("Expr_BinOp(Add, $lhs, rhs) ", 27))
+
+def generated_rule_2_infix_1_arms(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_2_infix_1_arm_0() as i64)
+    xs
+}
+
+def generated_rule_2_infix_1(): IrInfixBlock = IrInfixBlock(40, 41, generated_rule_2_infix_1_arms())
+
+def generated_rule_2_postfix_0_arm_0_items(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, IrItem(str_empty(), IrAtomRef(mk_str("Dot", 3)), IrQOne) as i64)
+    let _ = vec_push(xs, IrItem(mk_str("name", 4), IrAtomRef(mk_str("Ident", 5)), IrQOne) as i64)
+    xs
+}
+
+def generated_rule_2_postfix_0_arm_0(): IrAlt = IrAlt(generated_rule_2_postfix_0_arm_0_items(), mk_str("Expr_Field($lhs, name) ", 23))
+
+def generated_rule_2_postfix_0_arms(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_2_postfix_0_arm_0() as i64)
+    xs
+}
+
+def generated_rule_2_postfix_0(): IrPostfixBlock = IrPostfixBlock(70, generated_rule_2_postfix_0_arms())
+
+def generated_rule_2_prefixes(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_2_prefixes_0() as i64)
+    xs
+}
+
+def generated_rule_2_infixes(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_2_infixes_0() as i64)
+    let _ = vec_push(xs, generated_rule_2_infixes_1() as i64)
+    xs
+}
+
+def generated_rule_2_postfixes(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_2_postfixes_0() as i64)
+    xs
+}
+
+def generated_rule_2_pratt(): IrPrattRule = IrPrattRule(generated_rule_2_prefixes(), generated_rule_2_infixes(), generated_rule_2_postfixes())
+
+def generated_rule_2(): IrRule = IrRule(mk_str("expr", 4), IrBodyPratt(generated_rule_2_pratt()), 0)
+
+def generated_rules(): Vec = {
+    let xs = vec_new()
+    let _ = vec_push(xs, generated_rule_0() as i64)
+    let _ = vec_push(xs, generated_rule_1() as i64)
+    let _ = vec_push(xs, generated_rule_2() as i64)
+    xs
+}
+
+def generated_grammar_ir(): GrammarIr = GrammarIr(mk_str("programme", 9), generated_rules())
+
+def parse_debug_source(src: Str): LabeledAST =
+    run_start_rule(generated_grammar_ir(), source_token_tags(src))

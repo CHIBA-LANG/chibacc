@@ -1,29 +1,44 @@
 #![CHIBACC]
 {
     namespace parser.chiba
-    use frontend.ast.*
-    use frontend.token.*
 }
-start programme
-rule programme ::= items:item* Eof => Programme(items) ;
-rule item ::= attrs:item_attr* priv:KwPrivate? body:item_body => Item(attrs, priv != None, body) ;
+start expr
+rule arg_tail ::= Comma value:expr => value ;
+rule arg_list ::= head:expr tail:arg_tail* => ArgList(head, tail) | => ArgListEmpty() ;
 rule expr ::= pratt {
     prefix (20) {
-        Neg e:expr => Expr_UnOp(Neg, e) ;
-        Pos e:expr => Expr_PosOp(Pos, e) ;
+        n:Int => Expr_Int(n) ;
+        name:Ident => Expr_Name(name) ;
+        Neg e:expr => Expr_Neg(e) ;
+        Pos e:expr => Expr_Pos(e) ;
+        LParen e:expr RParen => e ;
     }
     postfix(70) {
+        LParen args:arg_list RParen => Expr_Call($lhs, args) ;
         Dot name:Ident => Expr_Field($lhs, name) ;
     }
     infix(50, 51) {
-        Slash rhs:expr => Expr_BinOp(Div, $lhs, rhs) ;
+        Star rhs:expr => Expr_Mul($lhs, rhs) ;
+        Slash rhs:expr => Expr_Div($lhs, rhs) ;
     }
     infix(40, 41) {
-        Plus rhs:expr => Expr_BinOp(Add, $lhs, rhs) ;
+        Plus rhs:expr => Expr_Add($lhs, rhs) ;
+        Minus rhs:expr => Expr_Sub($lhs, rhs) ;
     }
 } ;
 {
     data AST {
-        Programme(Vec)
+        ArgList(AST, Vec),
+        ArgListEmpty(),
+        Expr_Int(Str),
+        Expr_Name(Str),
+        Expr_Neg(AST),
+        Expr_Pos(AST),
+        Expr_Call(AST, AST),
+        Expr_Field(AST, Str),
+        Expr_Mul(AST, AST),
+        Expr_Div(AST, AST),
+        Expr_Add(AST, AST),
+        Expr_Sub(AST, AST)
     }
 }

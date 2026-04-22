@@ -1,0 +1,15 @@
+#![CHIBACC]
+{
+    namespace parser.predicate
+}
+start item
+rule item ::= name:Ident ?pred_ok(name) => Branch_True(name) | name:Ident => Branch_Fallback(name) ;
+{
+    def pred_ok(name: Str): i64 =
+        if name.len > 0 { 1 } else { 0 }
+
+    data AST {
+        Branch_True(Str),
+        Branch_Fallback(Str)
+    }
+}

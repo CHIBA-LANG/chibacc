@@ -1,0 +1,29 @@
+#![CHIBACC]
+{
+    namespace parser.pratt
+}
+start expr
+rule expr ::= pratt {
+    prefix (90) {
+        name:Ident => Expr_Name(name) ;
+        Neg e:expr => Expr_Neg(e) ;
+    }
+    postfix(80) {
+        Dot name:Ident => Expr_Field($lhs, name) ;
+    }
+    infix(60, 61) {
+        Star rhs:expr => Expr_Mul($lhs, rhs) ;
+    }
+    infix(50, 51) {
+        Plus rhs:expr => Expr_Add($lhs, rhs) ;
+    }
+} ;
+{
+    data AST {
+        Expr_Name(Str),
+        Expr_Neg(AST),
+        Expr_Field(AST, Str),
+        Expr_Mul(AST, AST),
+        Expr_Add(AST, AST)
+    }
+}

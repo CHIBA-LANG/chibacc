@@ -1,0 +1,52 @@
+def generated_result_has_ast(ast_opt: Option[i64]): i64 =
+    match ast_opt {
+        Some(_) => 1
+        None => 0
+    }
+
+def generated_result_append_tokens(out: Str, tokens: Vec, i: i64): i64 =
+    if i >= vec_len(tokens) { 0 }
+    else {
+        let _ = if i > 0 { str_push(out, 32) } else { 0 }
+        let tok = vec_get(tokens, i) as Str
+        let _ = str_append(out, tok)
+        generated_result_append_tokens(out, tokens, i + 1)
+    }
+
+def generated_result_render(res: LabeledAST): Str = {
+    let out = str_new()
+    match res {
+        OK(_, consumed) => {
+            let _ = str_push_cstr(out, "GeneratedParser.OK\n")
+            let _ = str_push_cstr(out, "ConsumedCount: ")
+            let _ = str_append_i64(out, vec_len(consumed))
+            let _ = str_push(out, 10)
+            let _ = str_push_cstr(out, "ConsumedTokens: ")
+            let _ = generated_result_append_tokens(out, consumed, 0)
+            let _ = str_push(out, 10)
+            out
+        }
+        Err(ast_opt, consumed) => {
+            let _ = str_push_cstr(out, "GeneratedParser.Err\n")
+            let _ = str_push_cstr(out, "HasPartialAst: ")
+            let _ = str_append_i64(out, generated_result_has_ast(ast_opt))
+            let _ = str_push(out, 10)
+            let _ = str_push_cstr(out, "ConsumedCount: ")
+            let _ = str_append_i64(out, vec_len(consumed))
+            let _ = str_push(out, 10)
+            let _ = str_push_cstr(out, "ConsumedTokens: ")
+            let _ = generated_result_append_tokens(out, consumed, 0)
+            let _ = str_push(out, 10)
+            out
+        }
+    }
+}
+
+#[entry]
+def main(argc: i64, argv: i64): i64 = {
+    let src = file_read_fd_all(0)
+    let out = generated_result_render(parse_source(src))
+    let _ = str_write_to(out, 1)
+    let _ = exit(0)
+    0
+}

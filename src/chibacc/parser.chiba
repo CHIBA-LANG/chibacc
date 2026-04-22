@@ -153,7 +153,12 @@ def capture_balanced_raw(ps: PState, open_kind: i64): (Str, PState, i64) = {
 
 def parse_quantifier(ps: PState): (Quantifier, PState) = {
     let tok = ps_cur(ps)
-    if tok_is_qmark(tok) != 0 { (QOptional, ps_adv(ps)) }
+    if tok_is_qmark(tok) != 0 {
+        let next1 = ps_peek(ps, 1)
+        let next2 = ps_peek(ps, 2)
+        if token_is_ident(next1) != 0 && tok_is_lparen(next2) != 0 { (QOne, ps) }
+        else { (QOptional, ps_adv(ps)) }
+    }
     else if tok_is_star(tok) != 0 { (QZeroOrMore, ps_adv(ps)) }
     else if tok_is_plus(tok) != 0 { (QOneOrMore, ps_adv(ps)) }
     else if tok_is_lbrace(tok) != 0 {

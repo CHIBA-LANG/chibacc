@@ -133,6 +133,68 @@ def emit_many_fn_name(out: Str, rule_i: i64, alt_i: i64, item_i: i64): i64 = {
     0
 }
 
+def emit_rule_bp_fn_name(out: Str, rule_i: i64): i64 = {
+    let _ = emit_rule_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "_bp")
+    0
+}
+
+def emit_pratt_block_fn_name(out: Str, rule_i: i64, kind: cstr, block_i: i64): i64 = {
+    let _ = emit_rule_fn_name(out, rule_i)
+    let _ = str_push(out, 95)
+    let _ = str_push_cstr(out, kind.ptr)
+    let _ = str_push_cstr(out, "_block_")
+    emit_i64(out, block_i)
+}
+
+def emit_pratt_arm_fn_name(out: Str, rule_i: i64, kind: cstr, block_i: i64, arm_i: i64): i64 = {
+    let _ = emit_pratt_block_fn_name(out, rule_i, kind, block_i)
+    let _ = str_push_cstr(out, "_arm_")
+    emit_i64(out, arm_i)
+}
+
+def emit_pratt_arm_step_fn_name(out: Str, rule_i: i64, kind: cstr, block_i: i64, arm_i: i64, step_i: i64): i64 = {
+    let _ = emit_pratt_arm_fn_name(out, rule_i, kind, block_i, arm_i)
+    let _ = str_push_cstr(out, "_step_")
+    emit_i64(out, step_i)
+}
+
+def emit_pratt_arm_item_fn_name(out: Str, rule_i: i64, kind: cstr, block_i: i64, arm_i: i64, item_i: i64): i64 = {
+    let _ = emit_pratt_arm_fn_name(out, rule_i, kind, block_i, arm_i)
+    let _ = str_push_cstr(out, "_item_")
+    emit_i64(out, item_i)
+}
+
+def emit_pratt_many_fn_name(out: Str, rule_i: i64, kind: cstr, block_i: i64, arm_i: i64, item_i: i64): i64 = {
+    let _ = emit_pratt_arm_item_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+    let _ = str_push_cstr(out, "_many")
+    0
+}
+
+def emit_pratt_prefix_dispatch_fn_name(out: Str, rule_i: i64): i64 = {
+    let _ = emit_rule_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "_prefix")
+    0
+}
+
+def emit_pratt_postfix_dispatch_fn_name(out: Str, rule_i: i64): i64 = {
+    let _ = emit_rule_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "_postfix")
+    0
+}
+
+def emit_pratt_infix_dispatch_fn_name(out: Str, rule_i: i64): i64 = {
+    let _ = emit_rule_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "_infix")
+    0
+}
+
+def emit_pratt_suffix_fn_name(out: Str, rule_i: i64): i64 = {
+    let _ = emit_rule_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "_suffix")
+    0
+}
+
 def emit_rule_parse_call(out: Str, rules: Vec, name: Str): i64 = {
     let idx = find_rule_index(rules, name)
     if idx < 0 { str_push_cstr(out, "MatchFail") }
@@ -163,6 +225,35 @@ def emit_atom_parse_expr(out: Str, rules: Vec, atom: IrAtom): i64 =
         IrAtomPredicate(_) => str_push_cstr(out, "MatchFail")
         IrAtomLookAnd(_) => str_push_cstr(out, "MatchFail")
         IrAtomLookNot(_) => str_push_cstr(out, "MatchFail")
+    }
+
+def emit_action_piece(out: Str, action: Str, i: i64): i64 =
+    if i >= action.len { 0 }
+    else if i + 3 < action.len && load8(action.ptr, i) == 36 && load8(action.ptr, i + 1) == 108 && load8(action.ptr, i + 2) == 104 && load8(action.ptr, i + 3) == 115 {
+        let _ = str_push_cstr(out, "__lhs_ast")
+        emit_action_piece(out, action, i + 4)
+    }
+    else {
+        let _ = str_push(out, load8(action.ptr, i))
+        emit_action_piece(out, action, i + 1)
+    }
+
+def emit_pratt_atom_parse_expr(out: Str, rules: Vec, rule_i: i64, rule_name: Str, self_bp: i64, atom: IrAtom): i64 =
+    match atom {
+        IrAtomRef(name) => {
+            if (name as i64) == 0 { str_push_cstr(out, "MatchFail") }
+            else if (rule_name as i64) != 0 && streq(name, rule_name) != 0 {
+                let _ = emit_rule_bp_fn_name(out, rule_i)
+                let _ = str_push_cstr(out, "(tokens, pos, ")
+                let _ = emit_i64(out, self_bp)
+                let _ = str_push(out, 41)
+                0
+            }
+            else {
+                emit_atom_parse_expr(out, rules, atom)
+            }
+        }
+        _ => emit_atom_parse_expr(out, rules, atom)
     }
 
 def emit_label_binding(out: Str, item: IrItem, item_i: i64): i64 =
@@ -210,6 +301,547 @@ def emit_label_bindings(out: Str, items: Vec, i: i64): i64 =
         emit_label_bindings(out, items, i + 1)
     }
 
+def emit_label_bindings_prefix(out: Str, items: Vec, i: i64, stop: i64): i64 =
+    if i >= stop || i >= vec_len(items) { 0 }
+    else {
+        let item = vec_get(items, i) as IrItem
+        let _ = emit_label_binding(out, item, i)
+        emit_label_bindings_prefix(out, items, i + 1, stop)
+    }
+
+def predicate_expr_start(raw: Str): i64 =
+    if raw.len > 0 && load8(raw.ptr, 0) == 63 { 1 } else { 0 }
+
+def emit_predicate_expr(out: Str, raw: Str): i64 =
+    emit_action_piece(out, raw, predicate_expr_start(raw))
+
+def emit_lhs_param(out: Str, has_lhs: i64): i64 =
+    if has_lhs != 0 { str_push_cstr(out, ", __lhs: i64") } else { 0 }
+
+def emit_lhs_arg(out: Str, has_lhs: i64): i64 =
+    if has_lhs != 0 { str_push_cstr(out, ", __lhs") } else { 0 }
+
+def emit_pratt_done_fn(out: Str, rule_i: i64, kind: cstr, block_i: i64, arm_i: i64, alt: IrAlt, has_lhs: i64): i64 =
+    match alt {
+        IrAlt(items, action) => {
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_pratt_arm_step_fn_name(out, rule_i, kind, block_i, arm_i, vec_len(items))
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+            let _ = emit_lhs_param(out, has_lhs)
+            let _ = emit_value_params(out, vec_len(items), 0)
+            let _ = str_push_cstr(out, "): MatchResult = {\n")
+            let _ = if has_lhs != 0 {
+                let _ = emit_line_cstr(out, 1, c"let __lhs_ast: AST = __lhs as AST")
+                0
+            } else { 0 }
+            let _ = emit_label_bindings(out, items, 0)
+            let _ = emit_indent(out, 1)
+            let _ = str_push_cstr(out, "MatchOK((")
+            let _ = emit_action_piece(out, action, 0)
+            let _ = str_push_cstr(out, ") as i64, pos)\n")
+            let _ = emit_line_cstr(out, 0, c"}")
+            let _ = str_push(out, 10)
+            0
+        }
+    }
+
+def emit_pratt_step_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, alt: IrAlt, step_i: i64, self_bp: i64, has_lhs: i64): i64 =
+    match alt {
+        IrAlt(items, _) => {
+            if step_i >= vec_len(items) { emit_pratt_done_fn(out, rule_i, kind, block_i, arm_i, alt, has_lhs) }
+            else {
+                let item = vec_get(items, step_i) as IrItem
+                match item {
+                    IrItem(_, IrAtomPredicate(raw), IrQOne) => {
+                        let _ = emit_indent(out, 0)
+                        let _ = str_push_cstr(out, "def ")
+                        let _ = emit_pratt_arm_step_fn_name(out, rule_i, kind, block_i, arm_i, step_i)
+                        let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+                        let _ = emit_lhs_param(out, has_lhs)
+                        let _ = emit_value_params(out, step_i, 0)
+                        let _ = str_push_cstr(out, "): MatchResult = {\n")
+                        let _ = if has_lhs != 0 {
+                            let _ = emit_line_cstr(out, 1, c"let __lhs_ast: AST = __lhs as AST")
+                            0
+                        } else { 0 }
+                        let _ = emit_label_bindings_prefix(out, items, 0, step_i)
+                        let _ = emit_indent(out, 1)
+                        let _ = str_push_cstr(out, "if ")
+                        let _ = emit_predicate_expr(out, raw)
+                        let _ = str_push_cstr(out, " != 0 { ")
+                        let _ = emit_pratt_arm_step_fn_name(out, rule_i, kind, block_i, arm_i, step_i + 1)
+                        let _ = str_push_cstr(out, "(tokens, pos")
+                        let _ = emit_lhs_arg(out, has_lhs)
+                        let _ = emit_value_args(out, step_i, 0)
+                        let _ = str_push_cstr(out, ", 1) } else { MatchFail }\n")
+                        let _ = emit_line_cstr(out, 0, c"}")
+                        let _ = str_push(out, 10)
+                        emit_pratt_step_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, alt, step_i + 1, self_bp, has_lhs)
+                    }
+                    _ => {
+                        let _ = emit_indent(out, 0)
+                        let _ = str_push_cstr(out, "def ")
+                        let _ = emit_pratt_arm_step_fn_name(out, rule_i, kind, block_i, arm_i, step_i)
+                        let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+                        let _ = emit_lhs_param(out, has_lhs)
+                        let _ = emit_value_params(out, step_i, 0)
+                        let _ = str_push_cstr(out, "): MatchResult =\n")
+                        let _ = emit_indent(out, 1)
+                        let _ = str_push_cstr(out, "match ")
+                        let _ = emit_pratt_arm_item_fn_name(out, rule_i, kind, block_i, arm_i, step_i)
+                        let _ = str_push_cstr(out, "(tokens, pos) {\n")
+                        let _ = emit_indent(out, 2)
+                        let _ = str_push_cstr(out, "MatchOK(__v")
+                        let _ = emit_i64(out, step_i)
+                        let _ = str_push_cstr(out, ", pos1) => ")
+                        let _ = emit_pratt_arm_step_fn_name(out, rule_i, kind, block_i, arm_i, step_i + 1)
+                        let _ = str_push_cstr(out, "(tokens, pos1")
+                        let _ = emit_lhs_arg(out, has_lhs)
+                        let _ = emit_value_args(out, step_i, 0)
+                        let _ = str_push_cstr(out, ", __v")
+                        let _ = emit_i64(out, step_i)
+                        let _ = str_push_cstr(out, ")\n")
+                        let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
+                        let _ = emit_line_cstr(out, 1, c"}")
+                        let _ = str_push(out, 10)
+                        emit_pratt_step_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, alt, step_i + 1, self_bp, has_lhs)
+                    }
+                }
+            }
+        }
+    }
+
+def emit_pratt_optional_item_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, item_i: i64, atom: IrAtom, self_bp: i64): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_arm_item_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult =\n")
+    let _ = emit_indent(out, 1)
+    let _ = str_push_cstr(out, "match ")
+    let _ = emit_pratt_atom_parse_expr(out, rules, rule_i, rule_name, self_bp, atom)
+    let _ = str_push_cstr(out, " {\n")
+    let _ = emit_line_cstr(out, 2, c"MatchOK(v, pos1) => {")
+    let _ = emit_line_cstr(out, 3, c"let some_v: Option[i64] = Some(v)")
+    let _ = emit_line_cstr(out, 3, c"MatchOK(some_v as i64, pos1)")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 2, c"MatchFail => {")
+    let _ = emit_line_cstr(out, 3, c"let none_v: Option[i64] = None")
+    let _ = emit_line_cstr(out, 3, c"MatchOK(none_v as i64, pos)")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_pratt_many_helper_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, item_i: i64, atom: IrAtom, min_count: i64, max_count: i64, self_bp: i64): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_many_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, acc: Vec, count: i64): MatchResult = {\n")
+    let _ = if max_count >= 0 {
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "if count >= ")
+        let _ = emit_i64(out, max_count)
+        let _ = str_push_cstr(out, " { MatchOK(acc as i64, pos) }\n")
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "else {\n")
+        let _ = emit_indent(out, 2)
+        let _ = str_push_cstr(out, "match ")
+        let _ = emit_pratt_atom_parse_expr(out, rules, rule_i, rule_name, self_bp, atom)
+        let _ = str_push_cstr(out, " {\n")
+        let _ = emit_line_cstr(out, 3, c"MatchOK(v, pos1) => {")
+        let _ = emit_line_cstr(out, 4, c"if pos1 == pos { MatchOK(acc as i64, pos) }")
+        let _ = emit_line_cstr(out, 4, c"else {")
+        let _ = emit_line_cstr(out, 5, c"let _ = vec_push(acc, v)")
+        let _ = emit_indent(out, 5)
+        let _ = emit_pratt_many_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+        let _ = str_push_cstr(out, "(tokens, pos1, acc, count + 1)\n")
+        let _ = emit_line_cstr(out, 4, c"}")
+        let _ = emit_line_cstr(out, 3, c"}")
+        let _ = if min_count <= 0 { emit_line_cstr(out, 3, c"MatchFail => MatchOK(acc as i64, pos)") }
+                else {
+                    let _ = emit_indent(out, 3)
+                    let _ = str_push_cstr(out, "MatchFail => if count >= ")
+                    let _ = emit_i64(out, min_count)
+                    let _ = str_push_cstr(out, " { MatchOK(acc as i64, pos) } else { MatchFail }\n")
+                    0
+                }
+        let _ = emit_line_cstr(out, 2, c"}")
+        let _ = emit_line_cstr(out, 1, c"}")
+        0
+    } else {
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "match ")
+        let _ = emit_pratt_atom_parse_expr(out, rules, rule_i, rule_name, self_bp, atom)
+        let _ = str_push_cstr(out, " {\n")
+        let _ = emit_line_cstr(out, 2, c"MatchOK(v, pos1) => {")
+        let _ = emit_line_cstr(out, 3, c"if pos1 == pos { MatchOK(acc as i64, pos) }")
+        let _ = emit_line_cstr(out, 3, c"else {")
+        let _ = emit_line_cstr(out, 4, c"let _ = vec_push(acc, v)")
+        let _ = emit_indent(out, 4)
+        let _ = emit_pratt_many_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+        let _ = str_push_cstr(out, "(tokens, pos1, acc, count + 1)\n")
+        let _ = emit_line_cstr(out, 3, c"}")
+        let _ = emit_line_cstr(out, 2, c"}")
+        let _ = if min_count <= 0 { emit_line_cstr(out, 2, c"MatchFail => MatchOK(acc as i64, pos)") }
+                else {
+                    let _ = emit_indent(out, 2)
+                    let _ = str_push_cstr(out, "MatchFail => if count >= ")
+                    let _ = emit_i64(out, min_count)
+                    let _ = str_push_cstr(out, " { MatchOK(acc as i64, pos) } else { MatchFail }\n")
+                    0
+                }
+        let _ = emit_line_cstr(out, 1, c"}")
+        0
+    }
+    let _ = emit_line_cstr(out, 0, c"}")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_pratt_repeat_item_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, item_i: i64, atom: IrAtom, min_count: i64, max_count: i64, self_bp: i64): i64 = {
+    let _ = emit_pratt_many_helper_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, item_i, atom, min_count, max_count, self_bp)
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_arm_item_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = ")
+    let _ = emit_pratt_many_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+    let _ = str_push_cstr(out, "(tokens, pos, vec_new(), 0)\n\n")
+    0
+}
+
+def emit_pratt_one_item_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, item_i: i64, atom: IrAtom, self_bp: i64): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_arm_item_fn_name(out, rule_i, kind, block_i, arm_i, item_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = ")
+    let _ = emit_pratt_atom_parse_expr(out, rules, rule_i, rule_name, self_bp, atom)
+    let _ = str_push_cstr(out, "\n\n")
+    0
+}
+
+def emit_pratt_item_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, item_i: i64, item: IrItem, self_bp: i64): i64 =
+    match item {
+        IrItem(_, atom, q) => {
+            match q {
+                IrQOne => emit_pratt_one_item_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, item_i, atom, self_bp)
+                IrQOptional => emit_pratt_optional_item_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, item_i, atom, self_bp)
+                IrQZeroOrMore => emit_pratt_repeat_item_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, item_i, atom, 0, 0 - 1, self_bp)
+                IrQOneOrMore => emit_pratt_repeat_item_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, item_i, atom, 1, 0 - 1, self_bp)
+                IrQRange(lo, hi) => emit_pratt_repeat_item_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, item_i, atom, lo, hi, self_bp)
+            }
+        }
+    }
+
+def emit_pratt_item_fns(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, items: Vec, i: i64, self_bp: i64): i64 =
+    if i >= vec_len(items) { 0 }
+    else {
+        let item = vec_get(items, i) as IrItem
+        let _ = emit_pratt_item_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, i, item, self_bp)
+        emit_pratt_item_fns(out, rules, rule_i, rule_name, kind, block_i, arm_i, items, i + 1, self_bp)
+    }
+
+def emit_pratt_arm_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arm_i: i64, alt: IrAlt, self_bp: i64, has_lhs: i64): i64 =
+    match alt {
+        IrAlt(items, _) => {
+            let _ = emit_pratt_item_fns(out, rules, rule_i, rule_name, kind, block_i, arm_i, items, 0, self_bp)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_pratt_arm_fn_name(out, rule_i, kind, block_i, arm_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+            let _ = emit_lhs_param(out, has_lhs)
+            let _ = str_push_cstr(out, "): MatchResult = ")
+            let _ = emit_pratt_arm_step_fn_name(out, rule_i, kind, block_i, arm_i, 0)
+            let _ = str_push_cstr(out, "(tokens, pos")
+            let _ = emit_lhs_arg(out, has_lhs)
+            let _ = str_push_cstr(out, ")\n\n")
+            emit_pratt_step_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, alt, 0, self_bp, has_lhs)
+        }
+    }
+
+def emit_pratt_arm_fns(out: Str, rules: Vec, rule_i: i64, rule_name: Str, kind: cstr, block_i: i64, arms: Vec, arm_i: i64, self_bp: i64, has_lhs: i64): i64 =
+    if arm_i >= vec_len(arms) { 0 }
+    else {
+        let alt = vec_get(arms, arm_i) as IrAlt
+        let _ = emit_pratt_arm_fn(out, rules, rule_i, rule_name, kind, block_i, arm_i, alt, self_bp, has_lhs)
+        emit_pratt_arm_fns(out, rules, rule_i, rule_name, kind, block_i, arms, arm_i + 1, self_bp, has_lhs)
+    }
+
+def emit_pratt_arm_dispatch(out: Str, rule_i: i64, kind: cstr, block_i: i64, arms: Vec, arm_i: i64, has_lhs: i64): i64 =
+    if arm_i >= vec_len(arms) { emit_line_cstr(out, 1, c"MatchFail") }
+    else {
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "match ")
+        let _ = emit_pratt_arm_fn_name(out, rule_i, kind, block_i, arm_i)
+        let _ = str_push_cstr(out, "(tokens, pos")
+        let _ = emit_lhs_arg(out, has_lhs)
+        let _ = str_push_cstr(out, ") {\n")
+        let _ = emit_line_cstr(out, 2, c"MatchOK(ast, pos1) => MatchOK(ast, pos1)")
+        if arm_i + 1 >= vec_len(arms) {
+            let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
+            let _ = emit_line_cstr(out, 1, c"}")
+            let _ = str_push(out, 10)
+            0
+        } else {
+            let _ = emit_indent(out, 2)
+            let _ = str_push_cstr(out, "MatchFail =>\n")
+            let _ = emit_pratt_arm_dispatch(out, rule_i, kind, block_i, arms, arm_i + 1, has_lhs)
+            let _ = emit_line_cstr(out, 1, c"}")
+            let _ = str_push(out, 10)
+            0
+        }
+    }
+
+def emit_pratt_prefix_block_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, block_i: i64, blk: IrPrefixBlock): i64 =
+    match blk {
+        IrPrefixBlock(bp, arms) => {
+            let _ = emit_pratt_arm_fns(out, rules, rule_i, rule_name, c"prefix", block_i, arms, 0, bp, 0)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_pratt_block_fn_name(out, rule_i, c"prefix", block_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult =\n")
+            emit_pratt_arm_dispatch(out, rule_i, c"prefix", block_i, arms, 0, 0)
+        }
+    }
+
+def emit_pratt_postfix_block_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, block_i: i64, blk: IrPostfixBlock): i64 =
+    match blk {
+        IrPostfixBlock(bp, arms) => {
+            let _ = emit_pratt_arm_fns(out, rules, rule_i, rule_name, c"postfix", block_i, arms, 0, bp, 1)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_pratt_block_fn_name(out, rule_i, c"postfix", block_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, __lhs: i64): MatchResult =\n")
+            emit_pratt_arm_dispatch(out, rule_i, c"postfix", block_i, arms, 0, 1)
+        }
+    }
+
+def emit_pratt_infix_block_fn(out: Str, rules: Vec, rule_i: i64, rule_name: Str, block_i: i64, blk: IrInfixBlock): i64 =
+    match blk {
+        IrInfixBlock(_, rbp, arms) => {
+            let _ = emit_pratt_arm_fns(out, rules, rule_i, rule_name, c"infix", block_i, arms, 0, rbp, 1)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_pratt_block_fn_name(out, rule_i, c"infix", block_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, __lhs: i64): MatchResult =\n")
+            emit_pratt_arm_dispatch(out, rule_i, c"infix", block_i, arms, 0, 1)
+        }
+    }
+
+def emit_pratt_prefix_block_fns(out: Str, rules: Vec, rule_i: i64, rule_name: Str, prefixes: Vec, block_i: i64): i64 =
+    if block_i >= vec_len(prefixes) { 0 }
+    else {
+        let blk = vec_get(prefixes, block_i) as IrPrefixBlock
+        let _ = emit_pratt_prefix_block_fn(out, rules, rule_i, rule_name, block_i, blk)
+        emit_pratt_prefix_block_fns(out, rules, rule_i, rule_name, prefixes, block_i + 1)
+    }
+
+def emit_pratt_postfix_block_fns(out: Str, rules: Vec, rule_i: i64, rule_name: Str, postfixes: Vec, block_i: i64): i64 =
+    if block_i >= vec_len(postfixes) { 0 }
+    else {
+        let blk = vec_get(postfixes, block_i) as IrPostfixBlock
+        let _ = emit_pratt_postfix_block_fn(out, rules, rule_i, rule_name, block_i, blk)
+        emit_pratt_postfix_block_fns(out, rules, rule_i, rule_name, postfixes, block_i + 1)
+    }
+
+def emit_pratt_infix_block_fns(out: Str, rules: Vec, rule_i: i64, rule_name: Str, infixes: Vec, block_i: i64): i64 =
+    if block_i >= vec_len(infixes) { 0 }
+    else {
+        let blk = vec_get(infixes, block_i) as IrInfixBlock
+        let _ = emit_pratt_infix_block_fn(out, rules, rule_i, rule_name, block_i, blk)
+        emit_pratt_infix_block_fns(out, rules, rule_i, rule_name, infixes, block_i + 1)
+    }
+
+def emit_pratt_prefix_dispatch_case(out: Str, rule_i: i64, prefixes: Vec, block_i: i64): i64 =
+    if block_i >= vec_len(prefixes) { emit_line_cstr(out, 1, c"MatchFail") }
+    else {
+        let _ = emit_indent(out, 1)
+        let _ = str_push_cstr(out, "match ")
+        let _ = emit_pratt_block_fn_name(out, rule_i, c"prefix", block_i)
+        let _ = str_push_cstr(out, "(tokens, pos) {\n")
+        let _ = emit_line_cstr(out, 2, c"MatchOK(ast, pos1) => MatchOK(ast, pos1)")
+        if block_i + 1 >= vec_len(prefixes) {
+            let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
+            let _ = emit_line_cstr(out, 1, c"}")
+            let _ = str_push(out, 10)
+            0
+        } else {
+            let _ = emit_indent(out, 2)
+            let _ = str_push_cstr(out, "MatchFail =>\n")
+            let _ = emit_pratt_prefix_dispatch_case(out, rule_i, prefixes, block_i + 1)
+            let _ = emit_line_cstr(out, 1, c"}")
+            let _ = str_push(out, 10)
+            0
+        }
+    }
+
+def emit_pratt_postfix_dispatch_case(out: Str, rule_i: i64, postfixes: Vec, block_i: i64): i64 =
+    if block_i >= vec_len(postfixes) { emit_line_cstr(out, 1, c"MatchFail") }
+    else {
+        let blk = vec_get(postfixes, block_i) as IrPostfixBlock
+        match blk {
+            IrPostfixBlock(bp, _) => {
+                let _ = emit_indent(out, 1)
+                let _ = str_push_cstr(out, "if min_bp <= ")
+                let _ = emit_i64(out, bp)
+                let _ = str_push_cstr(out, " {\n")
+                let _ = emit_indent(out, 2)
+                let _ = str_push_cstr(out, "match ")
+                let _ = emit_pratt_block_fn_name(out, rule_i, c"postfix", block_i)
+                let _ = str_push_cstr(out, "(tokens, pos, __lhs) {\n")
+                let _ = emit_line_cstr(out, 3, c"MatchOK(ast, pos1) => MatchOK(ast, pos1)")
+                if block_i + 1 >= vec_len(postfixes) {
+                    let _ = emit_line_cstr(out, 3, c"MatchFail => MatchFail")
+                } else {
+                    let _ = emit_indent(out, 3)
+                    let _ = str_push_cstr(out, "MatchFail =>\n")
+                    let _ = emit_pratt_postfix_dispatch_case(out, rule_i, postfixes, block_i + 1)
+                }
+                let _ = emit_line_cstr(out, 2, c"}")
+                let _ = emit_line_cstr(out, 1, c"}")
+                if block_i + 1 >= vec_len(postfixes) {
+                    let _ = emit_line_cstr(out, 1, c"else { MatchFail }")
+                } else {
+                    let _ = emit_indent(out, 1)
+                    let _ = str_push_cstr(out, "else {\n")
+                    let _ = emit_pratt_postfix_dispatch_case(out, rule_i, postfixes, block_i + 1)
+                    let _ = emit_line_cstr(out, 1, c"}")
+                }
+                let _ = str_push(out, 10)
+                0
+            }
+        }
+    }
+
+def emit_pratt_infix_dispatch_case(out: Str, rule_i: i64, infixes: Vec, block_i: i64): i64 =
+    if block_i >= vec_len(infixes) { emit_line_cstr(out, 1, c"MatchFail") }
+    else {
+        let blk = vec_get(infixes, block_i) as IrInfixBlock
+        match blk {
+            IrInfixBlock(lbp, _, _) => {
+                let _ = emit_indent(out, 1)
+                let _ = str_push_cstr(out, "if min_bp <= ")
+                let _ = emit_i64(out, lbp)
+                let _ = str_push_cstr(out, " {\n")
+                let _ = emit_indent(out, 2)
+                let _ = str_push_cstr(out, "match ")
+                let _ = emit_pratt_block_fn_name(out, rule_i, c"infix", block_i)
+                let _ = str_push_cstr(out, "(tokens, pos, __lhs) {\n")
+                let _ = emit_line_cstr(out, 3, c"MatchOK(ast, pos1) => MatchOK(ast, pos1)")
+                if block_i + 1 >= vec_len(infixes) {
+                    let _ = emit_line_cstr(out, 3, c"MatchFail => MatchFail")
+                } else {
+                    let _ = emit_indent(out, 3)
+                    let _ = str_push_cstr(out, "MatchFail =>\n")
+                    let _ = emit_pratt_infix_dispatch_case(out, rule_i, infixes, block_i + 1)
+                }
+                let _ = emit_line_cstr(out, 2, c"}")
+                let _ = emit_line_cstr(out, 1, c"}")
+                if block_i + 1 >= vec_len(infixes) {
+                    let _ = emit_line_cstr(out, 1, c"else { MatchFail }")
+                } else {
+                    let _ = emit_indent(out, 1)
+                    let _ = str_push_cstr(out, "else {\n")
+                    let _ = emit_pratt_infix_dispatch_case(out, rule_i, infixes, block_i + 1)
+                    let _ = emit_line_cstr(out, 1, c"}")
+                }
+                let _ = str_push(out, 10)
+                0
+            }
+        }
+    }
+
+def emit_pratt_prefix_dispatch_fn(out: Str, rule_i: i64, prefixes: Vec): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_prefix_dispatch_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult =\n")
+    let _ = emit_pratt_prefix_dispatch_case(out, rule_i, prefixes, 0)
+    0
+}
+
+def emit_pratt_postfix_dispatch_fn(out: Str, rule_i: i64, postfixes: Vec): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_postfix_dispatch_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, __lhs: i64, min_bp: i64): MatchResult =\n")
+    let _ = emit_pratt_postfix_dispatch_case(out, rule_i, postfixes, 0)
+    0
+}
+
+def emit_pratt_infix_dispatch_fn(out: Str, rule_i: i64, infixes: Vec): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_infix_dispatch_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, __lhs: i64, min_bp: i64): MatchResult =\n")
+    let _ = emit_pratt_infix_dispatch_case(out, rule_i, infixes, 0)
+    0
+}
+
+def emit_pratt_suffix_fn(out: Str, rule_i: i64): i64 = {
+    let _ = emit_indent(out, 0)
+    let _ = str_push_cstr(out, "def ")
+    let _ = emit_pratt_suffix_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, min_bp: i64, __lhs: i64): MatchResult =\n")
+    let _ = emit_indent(out, 1)
+    let _ = str_push_cstr(out, "match ")
+    let _ = emit_pratt_postfix_dispatch_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens, pos, __lhs, min_bp) {\n")
+    let _ = emit_line_cstr(out, 2, c"MatchOK(lhs1, pos1) =>")
+    let _ = emit_indent(out, 3)
+    let _ = emit_pratt_suffix_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens, pos1, min_bp, lhs1)\n")
+    let _ = emit_indent(out, 2)
+    let _ = str_push_cstr(out, "MatchFail => match ")
+    let _ = emit_pratt_infix_dispatch_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens, pos, __lhs, min_bp) {\n")
+    let _ = emit_line_cstr(out, 3, c"MatchOK(lhs1, pos1) =>")
+    let _ = emit_indent(out, 4)
+    let _ = emit_pratt_suffix_fn_name(out, rule_i)
+    let _ = str_push_cstr(out, "(tokens, pos1, min_bp, lhs1)\n")
+    let _ = emit_line_cstr(out, 3, c"MatchFail => MatchOK(__lhs, pos)")
+    let _ = emit_line_cstr(out, 2, c"}")
+    let _ = emit_line_cstr(out, 1, c"}")
+    let _ = str_push(out, 10)
+    0
+}
+
+def emit_pratt_rule_fns(out: Str, rules: Vec, rule_i: i64, rule_name: Str, pr: IrPrattRule): i64 =
+    match pr {
+        IrPrattRule(prefixes, infixes, postfixes) => {
+            let _ = emit_pratt_prefix_block_fns(out, rules, rule_i, rule_name, prefixes, 0)
+            let _ = emit_pratt_postfix_block_fns(out, rules, rule_i, rule_name, postfixes, 0)
+            let _ = emit_pratt_infix_block_fns(out, rules, rule_i, rule_name, infixes, 0)
+            let _ = emit_pratt_prefix_dispatch_fn(out, rule_i, prefixes)
+            let _ = emit_pratt_postfix_dispatch_fn(out, rule_i, postfixes)
+            let _ = emit_pratt_infix_dispatch_fn(out, rule_i, infixes)
+            let _ = emit_pratt_suffix_fn(out, rule_i)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_rule_bp_fn_name(out, rule_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64, min_bp: i64): MatchResult =\n")
+            let _ = emit_indent(out, 1)
+            let _ = str_push_cstr(out, "match ")
+            let _ = emit_pratt_prefix_dispatch_fn_name(out, rule_i)
+            let _ = str_push_cstr(out, "(tokens, pos) {\n")
+            let _ = emit_line_cstr(out, 2, c"MatchOK(lhs, pos1) =>")
+            let _ = emit_indent(out, 3)
+            let _ = emit_pratt_suffix_fn_name(out, rule_i)
+            let _ = str_push_cstr(out, "(tokens, pos1, min_bp, lhs)\n")
+            let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
+            let _ = emit_line_cstr(out, 1, c"}")
+            let _ = str_push(out, 10)
+            let _ = emit_indent(out, 0)
+            let _ = str_push_cstr(out, "def ")
+            let _ = emit_rule_fn_name(out, rule_i)
+            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = ")
+            let _ = emit_rule_bp_fn_name(out, rule_i)
+            let _ = str_push_cstr(out, "(tokens, pos, 0)\n\n")
+            0
+        }
+    }
+
 def emit_done_fn(out: Str, rule_i: i64, alt_i: i64, alt: IrAlt): i64 =
     match alt {
         IrAlt(items, action) => {
@@ -235,30 +867,55 @@ def emit_step_fn(out: Str, rules: Vec, rule_i: i64, alt_i: i64, alt: IrAlt, step
         IrAlt(items, _) => {
             if step_i >= vec_len(items) { emit_done_fn(out, rule_i, alt_i, alt) }
             else {
-                let _ = emit_indent(out, 0)
-                let _ = str_push_cstr(out, "def ")
-                let _ = emit_step_fn_name(out, rule_i, alt_i, step_i)
-                let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
-                let _ = emit_value_params(out, step_i, 0)
-                let _ = str_push_cstr(out, "): MatchResult =\n")
-                let _ = emit_indent(out, 1)
-                let _ = str_push_cstr(out, "match ")
-                let _ = emit_item_fn_name(out, rule_i, alt_i, step_i)
-                let _ = str_push_cstr(out, "(tokens, pos) {\n")
-                let _ = emit_indent(out, 2)
-                let _ = str_push_cstr(out, "MatchOK(__v")
-                let _ = emit_i64(out, step_i)
-                let _ = str_push_cstr(out, ", pos1) => ")
-                let _ = emit_step_fn_name(out, rule_i, alt_i, step_i + 1)
-                let _ = str_push_cstr(out, "(tokens, pos1")
-                let _ = emit_value_args(out, step_i, 0)
-                let _ = str_push_cstr(out, ", __v")
-                let _ = emit_i64(out, step_i)
-                let _ = str_push_cstr(out, ")\n")
-                let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
-                let _ = emit_line_cstr(out, 1, c"}")
-                let _ = str_push(out, 10)
-                emit_step_fn(out, rules, rule_i, alt_i, alt, step_i + 1)
+                let item = vec_get(items, step_i) as IrItem
+                match item {
+                    IrItem(_, IrAtomPredicate(raw), IrQOne) => {
+                        let _ = emit_indent(out, 0)
+                        let _ = str_push_cstr(out, "def ")
+                        let _ = emit_step_fn_name(out, rule_i, alt_i, step_i)
+                        let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+                        let _ = emit_value_params(out, step_i, 0)
+                        let _ = str_push_cstr(out, "): MatchResult = {\n")
+                        let _ = emit_label_bindings_prefix(out, items, 0, step_i)
+                        let _ = emit_indent(out, 1)
+                        let _ = str_push_cstr(out, "if ")
+                        let _ = emit_predicate_expr(out, raw)
+                        let _ = str_push_cstr(out, " != 0 { ")
+                        let _ = emit_step_fn_name(out, rule_i, alt_i, step_i + 1)
+                        let _ = str_push_cstr(out, "(tokens, pos")
+                        let _ = emit_value_args(out, step_i, 0)
+                        let _ = str_push_cstr(out, ", 1) } else { MatchFail }\n")
+                        let _ = emit_line_cstr(out, 0, c"}")
+                        let _ = str_push(out, 10)
+                        emit_step_fn(out, rules, rule_i, alt_i, alt, step_i + 1)
+                    }
+                    _ => {
+                        let _ = emit_indent(out, 0)
+                        let _ = str_push_cstr(out, "def ")
+                        let _ = emit_step_fn_name(out, rule_i, alt_i, step_i)
+                        let _ = str_push_cstr(out, "(tokens: Vec, pos: i64")
+                        let _ = emit_value_params(out, step_i, 0)
+                        let _ = str_push_cstr(out, "): MatchResult =\n")
+                        let _ = emit_indent(out, 1)
+                        let _ = str_push_cstr(out, "match ")
+                        let _ = emit_item_fn_name(out, rule_i, alt_i, step_i)
+                        let _ = str_push_cstr(out, "(tokens, pos) {\n")
+                        let _ = emit_indent(out, 2)
+                        let _ = str_push_cstr(out, "MatchOK(__v")
+                        let _ = emit_i64(out, step_i)
+                        let _ = str_push_cstr(out, ", pos1) => ")
+                        let _ = emit_step_fn_name(out, rule_i, alt_i, step_i + 1)
+                        let _ = str_push_cstr(out, "(tokens, pos1")
+                        let _ = emit_value_args(out, step_i, 0)
+                        let _ = str_push_cstr(out, ", __v")
+                        let _ = emit_i64(out, step_i)
+                        let _ = str_push_cstr(out, ")\n")
+                        let _ = emit_line_cstr(out, 2, c"MatchFail => MatchFail")
+                        let _ = emit_line_cstr(out, 1, c"}")
+                        let _ = str_push(out, 10)
+                        emit_step_fn(out, rules, rule_i, alt_i, alt, step_i + 1)
+                    }
+                }
             }
         }
     }
@@ -448,13 +1105,7 @@ def emit_rule_body_fn(out: Str, rules: Vec, rule_i: i64, rule: IrRule): i64 =
             let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult =\n")
             emit_rule_alt_dispatch(out, rule_i, alts, 0)
         }
-        IrBodyPratt(_) => {
-            let _ = emit_indent(out, 0)
-            let _ = str_push_cstr(out, "def ")
-            let _ = emit_rule_fn_name(out, rule_i)
-            let _ = str_push_cstr(out, "(tokens: Vec, pos: i64): MatchResult = MatchFail\n\n")
-            0
-        }
+        IrBodyPratt(pr) => emit_pratt_rule_fns(out, rules, rule_i, ir_rule_name(rule), pr)
     }
 
 def emit_rule_fns(out: Str, rules: Vec, rule_i: i64): i64 =

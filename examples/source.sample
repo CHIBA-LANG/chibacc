@@ -1,1 +1,1 @@
-minus(1)
+Ident LParen Ident Comma Int RParen Dot Ident Minus Neg Int Star Pos Int

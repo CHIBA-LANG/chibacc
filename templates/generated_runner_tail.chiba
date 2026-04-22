@@ -44,7 +44,11 @@ def generated_result_render(res: LabeledAST): Str = {
 
 #[entry]
 def main(argc: i64, argv: i64): i64 = {
-    let src = file_read_fd_all(0)
+    let src = if argc > 1 {
+        file_read_file_all(cstr_from_cptr(load64(argv, 1)))
+    } else {
+        file_read_fd_all(0)
+    }
     let out = generated_result_render(parse_source(src))
     let _ = str_write_to(out, 1)
     let _ = exit(0)

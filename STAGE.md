@@ -267,48 +267,57 @@ chibacc/
 
 ---
 
-## M4：best-effort recovery + 预测增强
+## [DONE] M4：best-effort recovery
 
 ### 目标
 
-实现与文档一致的、LL* 能做到的最佳努力恢复，并开始向更强预测演进。
+实现与文档一致的、LL* 能做到的最佳努力恢复，并把 recovery 变成所有 rule 都可尝试的统一语义。
 
 ### 任务
 
 - 区分“分支失败”和“真正 parse error”
 - 建立同步边界推导
+- 让普通 rule / Pratt rule / 被引用的子 rule 都先做本地 recovery 尝试，再决定是否向上提升
+- 明确“恢复结果”在 rule 边界上的传播方式，避免只有顶层或少数特殊路径能 recover
 - 支持：
 	- item 级恢复
 	- stmt 级恢复
 	- 列表分隔符恢复
 	- 闭合符恢复
 	- Pratt 低优先级停止点恢复
-- 顶层包装 `LabeledAST.Err(...)`
-- 基于 IR 计算更强的 lookahead 信息
-- 优化公共前缀 alt 的选择
-- 让 predicate 更早参与预测
-- 把高频分支从纯回滚改成预测优先
+- 顶层只负责在各层 rule recovery 都失败后包装 `LabeledAST.Err(...)`
 
 ### 原则
 
 - 不强行构造统一错误 AST 节点
 - 尽量保留 `Option[AST]`
+- recovery 不是“只有顶层做一次”的逻辑，而是每个 rule 都可以尝试、组合、再提升
+- 优先保证 rule 间恢复语义一致，再考虑更激进的局部修复策略
 - 恢复失败时尽快提升到更高层边界
 
 ### 交付物
 
+- rule-local recovery 语义
 - recovery runtime
 - recovery-aware codegen
 
 ### 注意
 
-这一阶段才是“更像 LL*”的阶段，但仍然以工程收益为导向，而不是追求论文式完整实现。
+这一阶段先把 recovery 做扎实，保证错误输入时的行为稳定、可调试、可验证。重点不是给少数入口“补一个错误返回”，而是让整个 rule 调用链都有一致的 recovery 行为。
 
 ### 验收
 
 - 有语法错误的输入不会立刻全停
+- 嵌套 rule、列表 rule、Pratt rule 都能先尝试本地 recovery，再决定是否向上失败
 - 顶层返回 `LabeledAST.Err(...)`
 - 能保留失败 token 片段
+
+当前已用以下链路验证：
+
+- `chibacc/examples/sample.chibacc`
+- `chibacc/examples/sample_missing_rparen.source`
+- `chibacc/examples/stmt_recovery.chibacc`
+- `chibacc/examples/stmt_recovery_missing_expr.source`
 
 ---
 
@@ -336,11 +345,45 @@ chibacc/
 
 ### 5.4 recovery 测试
 
+- 所有 rule 都具备 recovery 尝试能力
+- 嵌套 rule 失败后的上抛与继续解析
 - 缺失分隔符
 - 缺失闭合符
 - 错误 token 插入
 - 错误 alt 分支回滚
 - 顶层 `LabeledAST.Err(...)` 输出
+
+---
+
+## M5：预测与优化
+
+### 目标
+
+在 recovery 已经稳定、测试用例已经固定之后，再推进预测增强和生成质量优化。
+
+### 任务
+
+- 基于 IR 计算更强的 lookahead 信息
+- 优化公共前缀 alt 的选择
+- 让 predicate 更早参与预测
+- 把高频分支从纯回滚改成预测优先
+
+### 原则
+
+- 不为了“更像论文里的 LL*”而打乱已经稳定的 recovery 语义
+- 优先做可测量、可回归的优化
+- 保持生成结果可读、可调试
+
+### 交付物
+
+- prediction-aware codegen
+- 更少回滚的 parser 生成策略
+
+### 验收
+
+- 常见公共前缀 grammar 的回滚次数下降
+- predicate 能更早参与分支选择
+- 不破坏 recovery 的既有测试结果
 
 ---
 
@@ -390,7 +433,9 @@ ChibaCC 第一版可认为“完成”的标准是：
 8. 写 `codegen.chiba`
 9. 先跑普通 `rule`
 10. 再接 Pratt
-11. 最后做 recovery 和预测增强
+11. 先做 recovery
+12. 补 recovery 测试
+13. 最后做预测与优化
 
 ---
 

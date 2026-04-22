@@ -23,6 +23,21 @@ data LabeledAST {
     Err(Option[DebugAST], Vec)
 }
 
+data DebugParseResult {
+    ParseOK(DebugAST, i64, i64),
+    ParseFail(i64)
+}
+
+data DebugNodesResult {
+    NodesOK(Vec, i64, i64),
+    NodesFail(i64)
+}
+
+data DebugManyResult {
+    ManyOK(Vec, i64, i64, i64),
+    ManyFail(i64)
+}
+
 data DebugBinding {
     DebugBinding(Str, DebugAST)
 }
@@ -247,6 +262,14 @@ def eval_predicate(file: FileAst, raw: Str, bindings: Vec): i64 = {
 
 def empty_consumed_tokens(): Vec = vec_new()
 
+def fail_deeper(a: i64, b: i64): i64 =
+    if a >= b { a } else { b }
+
+def recover_or(a: i64, b: i64): i64 =
+    if a != 0 { 1 }
+    else if b != 0 { 1 }
+    else { 0 }
+
 def is_space_byte(b: i64): i64 =
     if b == 32 { 1 }
     else if b == 10 { 1 }
@@ -281,6 +304,60 @@ def rule_name_is_token(name: Str): i64 =
         if ch >= 65 && ch <= 90 { 1 } else { 0 }
     }
 
+def item_is_required_rule_ref(item: IrItem): i64 =
+    match item {
+        IrItem(_, IrAtomRef(name), IrQOne) => {
+            if streq(name, mk_str("Eof", 3)) != 0 { 0 }
+            else if rule_name_is_token(name) != 0 { 0 }
+            else { 1 }
+        }
+        _ => 0
+    }
+
+def item_sync_token_name(item: IrItem): Option[Str] =
+    match item {
+        IrItem(_, IrAtomRef(name), _) => {
+            if streq(name, mk_str("Eof", 3)) != 0 { Some(name) }
+            else if rule_name_is_token(name) != 0 { Some(name) }
+            else { None }
+        }
+        _ => None
+    }
+
+def find_sync_token_in_items(items: Vec, i: i64): Option[Str] =
+    if i >= vec_len(items) { None }
+    else {
+        let item = vec_get(items, i) as IrItem
+        match item_sync_token_name(item) {
+            Some(name) => Some(name)
+            None => find_sync_token_in_items(items, i + 1)
+        }
+    }
+
+def token_matches_name(tokens: Vec, pos: i64, name: Str): i64 =
+    if streq(name, mk_str("Eof", 3)) != 0 {
+        if pos == vec_len(tokens) { 1 } else { 0 }
+    }
+    else if pos < vec_len(tokens) {
+        let tok = vec_get(tokens, pos) as Str
+        if (tok as i64) != 0 && streq(tok, name) != 0 { 1 } else { 0 }
+    }
+    else { 0 }
+
+def find_token_position(tokens: Vec, pos: i64, name: Str): i64 =
+    if pos > vec_len(tokens) { 0 - 1 }
+    else if token_matches_name(tokens, pos, name) != 0 { pos }
+    else { find_token_position(tokens, pos + 1, name) }
+
+def try_local_recovery_position(item: IrItem, items: Vec, tokens: Vec, fail_pos: i64, next_i: i64): i64 =
+    if item_is_required_rule_ref(item) == 0 { 0 - 1 }
+    else {
+        match find_sync_token_in_items(items, next_i) {
+            Some(sync_name) => find_token_position(tokens, fail_pos, sync_name)
+            None => 0 - 1
+        }
+    }
+
 def token_prefix(tokens: Vec, n: i64): Vec =
     token_prefix_loop(tokens, 0, n, vec_new())
 
@@ -304,28 +381,28 @@ def find_rule_named_loop(rules: Vec, name: Str, i: i64): Option[IrRule] =
         else { find_rule_named_loop(rules, name, i + 1) }
     }
 
-def parse_atom(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+def parse_atom(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64): DebugParseResult =
     match atom {
         IrAtomRef(name) => {
-            if (name as i64) == 0 { None }
+            if (name as i64) == 0 { ParseFail(pos) }
             else if streq(name, mk_str("Eof", 3)) != 0 {
-                if pos == vec_len(tokens) { Some((DebugToken(name), pos)) } else { None }
+                if pos == vec_len(tokens) { ParseOK(DebugToken(name), pos, 0) } else { ParseFail(pos) }
             }
             else if rule_name_is_token(name) != 0 {
                 if pos < vec_len(tokens) {
                     let tok = vec_get(tokens, pos) as Str
                     if (tok as i64) != 0 && streq(tok, name) != 0 {
-                        Some((DebugToken(name), pos + 1))
-                    } else { None }
-                } else { None }
+                        ParseOK(DebugToken(name), pos + 1, 0)
+                    } else { ParseFail(pos) }
+                } else { ParseFail(pos) }
             }
             else {
                 parse_rule_named(ir, name, tokens, pos)
             }
         }
-        IrAtomPredicate(_) => None
-        IrAtomLookAnd(_) => None
-        IrAtomLookNot(_) => None
+        IrAtomPredicate(_) => ParseFail(pos)
+        IrAtomLookAnd(_) => ParseFail(pos)
+        IrAtomLookNot(_) => ParseFail(pos)
     }
 
 def push_all_children(dst: Vec, src: Vec): i64 =
@@ -338,136 +415,161 @@ def push_all_children_loop(dst: Vec, src: Vec, i: i64): i64 =
         push_all_children_loop(dst, src, i + 1)
     }
 
-def parse_item(ir: GrammarIr, item: IrItem, tokens: Vec, pos: i64): Option[(Vec, i64)] =
+def parse_item(ir: GrammarIr, item: IrItem, tokens: Vec, pos: i64): DebugNodesResult =
     match item {
         IrItem(_, atom, q) => parse_quantified_atom(ir, atom, q, tokens, pos)
     }
 
-def parse_item_with_file(file: FileAst, ir: GrammarIr, item: IrItem, tokens: Vec, pos: i64, bindings: Vec): Option[(Vec, i64)] =
+def parse_item_with_file(file: FileAst, ir: GrammarIr, item: IrItem, tokens: Vec, pos: i64, bindings: Vec): DebugNodesResult =
     match item {
         IrItem(_, IrAtomPredicate(raw), IrQOne) => {
-            if eval_predicate(file, raw, bindings) != 0 { Some((vec_new(), pos)) }
-            else { None }
+            if eval_predicate(file, raw, bindings) != 0 { NodesOK(vec_new(), pos, 0) }
+            else { NodesFail(pos) }
         }
         _ => parse_item(ir, item, tokens, pos)
     }
 
-def parse_quantified_atom(ir: GrammarIr, atom: IrAtom, q: IrQuantifier, tokens: Vec, pos: i64): Option[(Vec, i64)] =
+def parse_quantified_atom(ir: GrammarIr, atom: IrAtom, q: IrQuantifier, tokens: Vec, pos: i64): DebugNodesResult =
     match q {
         IrQOne => {
             match parse_atom(ir, atom, tokens, pos) {
-                Some((node, pos1)) => {
+                ParseOK(node, pos1, recovered) => {
                     let out = vec_new()
                     let _ = vec_push(out, node as i64)
-                    Some((out, pos1))
+                    NodesOK(out, pos1, recovered)
                 }
-                None => None
+                ParseFail(fail_pos) => NodesFail(fail_pos)
             }
         }
         IrQOptional => {
             match parse_atom(ir, atom, tokens, pos) {
-                Some((node, pos1)) => {
+                ParseOK(node, pos1, recovered) => {
                     let out = vec_new()
                     let _ = vec_push(out, node as i64)
-                    Some((out, pos1))
+                    NodesOK(out, pos1, recovered)
                 }
-                None => Some((vec_new(), pos))
+                ParseFail(fail_pos) => {
+                    if fail_pos > pos { NodesFail(fail_pos) }
+                    else { NodesOK(vec_new(), pos, 0) }
+                }
             }
         }
-        IrQZeroOrMore => Some(parse_many_atom(ir, atom, tokens, pos, 0))
+        IrQZeroOrMore => {
+            match parse_many_atom(ir, atom, tokens, pos, 0, 0) {
+                ManyOK(nodes, pos1, _, recovered) => NodesOK(nodes, pos1, recovered)
+                ManyFail(fail_pos) => NodesFail(fail_pos)
+            }
+        }
         IrQOneOrMore => {
-            let (nodes, pos1, count) = parse_many_atom(ir, atom, tokens, pos, 0)
-            if count > 0 { Some((nodes, pos1)) } else { None }
+            match parse_many_atom(ir, atom, tokens, pos, 0, 0) {
+                ManyOK(nodes, pos1, count, recovered) => {
+                    if count > 0 { NodesOK(nodes, pos1, recovered) } else { NodesFail(pos1) }
+                }
+                ManyFail(fail_pos) => NodesFail(fail_pos)
+            }
         }
         IrQRange(lo, hi) => {
-            let (nodes, pos1, count) = parse_many_atom_bound(ir, atom, tokens, pos, 0, hi)
-            if count >= lo { Some((nodes, pos1)) } else { None }
+            match parse_many_atom_bound(ir, atom, tokens, pos, 0, hi, 0) {
+                ManyOK(nodes, pos1, count, recovered) => {
+                    if count >= lo { NodesOK(nodes, pos1, recovered) } else { NodesFail(pos1) }
+                }
+                ManyFail(fail_pos) => NodesFail(fail_pos)
+            }
         }
     }
 
-def parse_many_atom(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64): (Vec, i64, i64) =
-    parse_many_atom_loop(ir, atom, tokens, pos, count, vec_new())
+def parse_many_atom(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64, recovered: i64): DebugManyResult =
+    parse_many_atom_loop(ir, atom, tokens, pos, count, vec_new(), recovered)
 
-def parse_many_atom_loop(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64, out: Vec): (Vec, i64, i64) =
+def parse_many_atom_loop(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64, out: Vec, recovered: i64): DebugManyResult =
     match parse_atom(ir, atom, tokens, pos) {
-        Some((node, pos1)) => {
+        ParseOK(node, pos1, recovered1) => {
+            let recovered2 = recover_or(recovered, recovered1)
             if pos1 == pos {
-                let __r = (out, pos, count)
-                __r
+                ManyOK(out, pos, count, recovered2)
             }
             else {
                 let _ = vec_push(out, node as i64)
-                parse_many_atom_loop(ir, atom, tokens, pos1, count + 1, out)
+                parse_many_atom_loop(ir, atom, tokens, pos1, count + 1, out, recovered2)
             }
         }
-        None => {
-            let __r = (out, pos, count)
-            __r
+        ParseFail(fail_pos) => {
+            if fail_pos > pos { ManyFail(fail_pos) }
+            else { ManyOK(out, pos, count, recovered) }
         }
     }
 
-def parse_many_atom_bound(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64, hi: i64): (Vec, i64, i64) =
+def parse_many_atom_bound(ir: GrammarIr, atom: IrAtom, tokens: Vec, pos: i64, count: i64, hi: i64, recovered: i64): DebugManyResult =
     if hi >= 0 && count >= hi {
-        let __r = (vec_new(), pos, count)
-        __r
+        ManyOK(vec_new(), pos, count, recovered)
     }
     else {
-        let (out, pos1, count1) = parse_many_atom(ir, atom, tokens, pos, count)
-        let __r = (out, pos1, count1)
-        __r
+        parse_many_atom(ir, atom, tokens, pos, count, recovered)
     }
 
-def parse_alt(ir: GrammarIr, rule_name: Str, alt: IrAlt, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+def parse_alt(ir: GrammarIr, rule_name: Str, alt: IrAlt, tokens: Vec, pos: i64): DebugParseResult =
     match alt {
         IrAlt(items, action) => {
-            match parse_alt_items(ir, items, tokens, pos, 0, vec_new()) {
-                Some((children, pos1)) => Some((DebugNode(rule_name, children, action), pos1))
-                None => None
+            match parse_alt_items(ir, items, tokens, pos, 0, vec_new(), 0) {
+                NodesOK(children, pos1, recovered) => ParseOK(DebugNode(rule_name, children, action), pos1, recovered)
+                NodesFail(fail_pos) => ParseFail(fail_pos)
             }
         }
     }
 
-def parse_alt_with_file(file: FileAst, ir: GrammarIr, rule_name: Str, alt: IrAlt, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+def parse_alt_with_file(file: FileAst, ir: GrammarIr, rule_name: Str, alt: IrAlt, tokens: Vec, pos: i64): DebugParseResult =
     match alt {
         IrAlt(items, action) => {
-            match parse_alt_items_with_file(file, ir, items, tokens, pos, 0, vec_new(), vec_new()) {
-                Some((children, pos1)) => Some((DebugNode(rule_name, children, action), pos1))
-                None => None
+            match parse_alt_items_with_file(file, ir, items, tokens, pos, 0, vec_new(), vec_new(), 0) {
+                NodesOK(children, pos1, recovered) => ParseOK(DebugNode(rule_name, children, action), pos1, recovered)
+                NodesFail(fail_pos) => ParseFail(fail_pos)
             }
         }
     }
 
-def parse_alt_items(ir: GrammarIr, items: Vec, tokens: Vec, pos: i64, i: i64, children: Vec): Option[(Vec, i64)] =
-    if i >= vec_len(items) { Some((children, pos)) }
+def parse_alt_items(ir: GrammarIr, items: Vec, tokens: Vec, pos: i64, i: i64, children: Vec, recovered: i64): DebugNodesResult =
+    if i >= vec_len(items) { NodesOK(children, pos, recovered) }
     else {
         let item = vec_get(items, i) as IrItem
         match parse_item(ir, item, tokens, pos) {
-            Some((nodes, pos1)) => {
+            NodesOK(nodes, pos1, recovered1) => {
                 let _ = push_all_children(children, nodes)
-                parse_alt_items(ir, items, tokens, pos1, i + 1, children)
+                parse_alt_items(ir, items, tokens, pos1, i + 1, children, recover_or(recovered, recovered1))
             }
-            None => None
+            NodesFail(fail_pos) => {
+                let recover_pos = try_local_recovery_position(item, items, tokens, fail_pos, i + 1)
+                if recover_pos >= 0 {
+                    parse_alt_items(ir, items, tokens, recover_pos, i + 1, children, 1)
+                }
+                else { NodesFail(fail_pos) }
+            }
         }
     }
 
-def parse_alt_items_with_file(file: FileAst, ir: GrammarIr, items: Vec, tokens: Vec, pos: i64, i: i64, children: Vec, bindings: Vec): Option[(Vec, i64)] =
-    if i >= vec_len(items) { Some((children, pos)) }
+def parse_alt_items_with_file(file: FileAst, ir: GrammarIr, items: Vec, tokens: Vec, pos: i64, i: i64, children: Vec, bindings: Vec, recovered: i64): DebugNodesResult =
+    if i >= vec_len(items) { NodesOK(children, pos, recovered) }
     else {
         let item = vec_get(items, i) as IrItem
         match parse_item_with_file(file, ir, item, tokens, pos, bindings) {
-            Some((nodes, pos1)) => {
+            NodesOK(nodes, pos1, recovered1) => {
                 let _ = push_all_children(children, nodes)
                 let _ = bind_item_nodes(bindings, item, nodes)
-                parse_alt_items_with_file(file, ir, items, tokens, pos1, i + 1, children, bindings)
+                parse_alt_items_with_file(file, ir, items, tokens, pos1, i + 1, children, bindings, recover_or(recovered, recovered1))
             }
-            None => None
+            NodesFail(fail_pos) => {
+                let recover_pos = try_local_recovery_position(item, items, tokens, fail_pos, i + 1)
+                if recover_pos >= 0 {
+                    parse_alt_items_with_file(file, ir, items, tokens, recover_pos, i + 1, children, bindings, 1)
+                }
+                else { NodesFail(fail_pos) }
+            }
         }
     }
 
-def parse_pratt_atom(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, self_bp: i64): Option[(DebugAST, i64)] =
+def parse_pratt_atom(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, self_bp: i64): DebugParseResult =
     match atom {
         IrAtomRef(name) => {
-            if (name as i64) == 0 { None }
+            if (name as i64) == 0 { ParseFail(pos) }
             else if (self_name as i64) != 0 && streq(name, self_name) != 0 {
                 parse_pratt_rule_bp(ir, self_name, pr, tokens, pos, self_bp)
             }
@@ -478,74 +580,87 @@ def parse_pratt_atom(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAto
         _ => parse_atom(ir, atom, tokens, pos)
     }
 
-def parse_pratt_item(ir: GrammarIr, self_name: Str, pr: IrPrattRule, item: IrItem, tokens: Vec, pos: i64, self_bp: i64): Option[(Vec, i64)] =
+def parse_pratt_item(ir: GrammarIr, self_name: Str, pr: IrPrattRule, item: IrItem, tokens: Vec, pos: i64, self_bp: i64): DebugNodesResult =
     match item {
         IrItem(_, atom, q) => parse_pratt_quantified_atom(ir, self_name, pr, atom, q, tokens, pos, self_bp)
     }
 
-def parse_pratt_quantified_atom(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, q: IrQuantifier, tokens: Vec, pos: i64, self_bp: i64): Option[(Vec, i64)] =
+def parse_pratt_quantified_atom(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, q: IrQuantifier, tokens: Vec, pos: i64, self_bp: i64): DebugNodesResult =
     match q {
         IrQOne => {
             match parse_pratt_atom(ir, self_name, pr, atom, tokens, pos, self_bp) {
-                Some((node, pos1)) => {
+                ParseOK(node, pos1, recovered) => {
                     let out = vec_new()
                     let _ = vec_push(out, node as i64)
-                    Some((out, pos1))
+                    NodesOK(out, pos1, recovered)
                 }
-                None => None
+                ParseFail(fail_pos) => NodesFail(fail_pos)
             }
         }
         IrQOptional => {
             match parse_pratt_atom(ir, self_name, pr, atom, tokens, pos, self_bp) {
-                Some((node, pos1)) => {
+                ParseOK(node, pos1, recovered) => {
                     let out = vec_new()
                     let _ = vec_push(out, node as i64)
-                    Some((out, pos1))
+                    NodesOK(out, pos1, recovered)
                 }
-                None => Some((vec_new(), pos))
+                ParseFail(fail_pos) => {
+                    if fail_pos > pos { NodesFail(fail_pos) }
+                    else { NodesOK(vec_new(), pos, 0) }
+                }
             }
         }
-        IrQZeroOrMore => Some(parse_many_pratt_atom(ir, self_name, pr, atom, tokens, pos, 0, self_bp))
+        IrQZeroOrMore => {
+            match parse_many_pratt_atom(ir, self_name, pr, atom, tokens, pos, 0, self_bp, 0) {
+                ManyOK(nodes, pos1, _, recovered) => NodesOK(nodes, pos1, recovered)
+                ManyFail(fail_pos) => NodesFail(fail_pos)
+            }
+        }
         IrQOneOrMore => {
-            let (nodes, pos1, count) = parse_many_pratt_atom(ir, self_name, pr, atom, tokens, pos, 0, self_bp)
-            if count > 0 { Some((nodes, pos1)) } else { None }
+            match parse_many_pratt_atom(ir, self_name, pr, atom, tokens, pos, 0, self_bp, 0) {
+                ManyOK(nodes, pos1, count, recovered) => {
+                    if count > 0 { NodesOK(nodes, pos1, recovered) } else { NodesFail(pos1) }
+                }
+                ManyFail(fail_pos) => NodesFail(fail_pos)
+            }
         }
         IrQRange(lo, hi) => {
-            let (nodes, pos1, count) = parse_many_pratt_atom_bound(ir, self_name, pr, atom, tokens, pos, 0, hi, self_bp)
-            if count >= lo { Some((nodes, pos1)) } else { None }
+            match parse_many_pratt_atom_bound(ir, self_name, pr, atom, tokens, pos, 0, hi, self_bp, 0) {
+                ManyOK(nodes, pos1, count, recovered) => {
+                    if count >= lo { NodesOK(nodes, pos1, recovered) } else { NodesFail(pos1) }
+                }
+                ManyFail(fail_pos) => NodesFail(fail_pos)
+            }
         }
     }
 
-def parse_many_pratt_atom(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, count: i64, self_bp: i64): (Vec, i64, i64) =
-    parse_many_pratt_atom_loop(ir, self_name, pr, atom, tokens, pos, count, vec_new(), self_bp)
+def parse_many_pratt_atom(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, count: i64, self_bp: i64, recovered: i64): DebugManyResult =
+    parse_many_pratt_atom_loop(ir, self_name, pr, atom, tokens, pos, count, vec_new(), self_bp, recovered)
 
-def parse_many_pratt_atom_loop(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, count: i64, out: Vec, self_bp: i64): (Vec, i64, i64) =
+def parse_many_pratt_atom_loop(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, count: i64, out: Vec, self_bp: i64, recovered: i64): DebugManyResult =
     match parse_pratt_atom(ir, self_name, pr, atom, tokens, pos, self_bp) {
-        Some((node, pos1)) => {
+        ParseOK(node, pos1, recovered1) => {
+            let recovered2 = recover_or(recovered, recovered1)
             if pos1 == pos {
-                let __r = (out, pos, count)
-                __r
+                ManyOK(out, pos, count, recovered2)
             }
             else {
                 let _ = vec_push(out, node as i64)
-                parse_many_pratt_atom_loop(ir, self_name, pr, atom, tokens, pos1, count + 1, out, self_bp)
+                parse_many_pratt_atom_loop(ir, self_name, pr, atom, tokens, pos1, count + 1, out, self_bp, recovered2)
             }
         }
-        None => {
-            let __r = (out, pos, count)
-            __r
+        ParseFail(fail_pos) => {
+            if fail_pos > pos { ManyFail(fail_pos) }
+            else { ManyOK(out, pos, count, recovered) }
         }
     }
 
-def parse_many_pratt_atom_bound(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, count: i64, hi: i64, self_bp: i64): (Vec, i64, i64) =
+def parse_many_pratt_atom_bound(ir: GrammarIr, self_name: Str, pr: IrPrattRule, atom: IrAtom, tokens: Vec, pos: i64, count: i64, hi: i64, self_bp: i64, recovered: i64): DebugManyResult =
     if hi >= 0 && count >= hi {
-        let __r = (vec_new(), pos, count)
-        __r
+        ManyOK(vec_new(), pos, count, recovered)
     }
     else {
-        let (out, pos1, count1) = parse_many_pratt_atom(ir, self_name, pr, atom, tokens, pos, count, self_bp)
-        let __r = (out, pos1, count1)
-        __r
+        parse_many_pratt_atom(ir, self_name, pr, atom, tokens, pos, count, self_bp, recovered)
     }
 
 def pratt_children_with_lhs(lhs: Option[DebugAST]): Vec = {
@@ -557,173 +672,207 @@ def pratt_children_with_lhs(lhs: Option[DebugAST]): Vec = {
     out
 }
 
-def parse_pratt_alt(ir: GrammarIr, rule_name: Str, self_name: Str, pr: IrPrattRule, alt: IrAlt, tokens: Vec, pos: i64, self_bp: i64, lhs: Option[DebugAST]): Option[(DebugAST, i64)] =
+def parse_pratt_alt(ir: GrammarIr, rule_name: Str, self_name: Str, pr: IrPrattRule, alt: IrAlt, tokens: Vec, pos: i64, self_bp: i64, lhs: Option[DebugAST]): DebugParseResult =
     match alt {
         IrAlt(items, action) => {
             let children = pratt_children_with_lhs(lhs)
-            match parse_pratt_alt_items(ir, self_name, pr, items, tokens, pos, 0, children, self_bp) {
-                Some((nodes, pos1)) => Some((DebugNode(rule_name, nodes, action), pos1))
-                None => None
+            match parse_pratt_alt_items(ir, self_name, pr, items, tokens, pos, 0, children, self_bp, 0) {
+                NodesOK(nodes, pos1, recovered) => ParseOK(DebugNode(rule_name, nodes, action), pos1, recovered)
+                NodesFail(fail_pos) => ParseFail(fail_pos)
             }
         }
     }
 
-def parse_pratt_alt_items(ir: GrammarIr, self_name: Str, pr: IrPrattRule, items: Vec, tokens: Vec, pos: i64, i: i64, children: Vec, self_bp: i64): Option[(Vec, i64)] =
-    if i >= vec_len(items) { Some((children, pos)) }
+def parse_pratt_alt_items(ir: GrammarIr, self_name: Str, pr: IrPrattRule, items: Vec, tokens: Vec, pos: i64, i: i64, children: Vec, self_bp: i64, recovered: i64): DebugNodesResult =
+    if i >= vec_len(items) { NodesOK(children, pos, recovered) }
     else {
         let item = vec_get(items, i) as IrItem
         match parse_pratt_item(ir, self_name, pr, item, tokens, pos, self_bp) {
-            Some((nodes, pos1)) => {
+            NodesOK(nodes, pos1, recovered1) => {
                 let _ = push_all_children(children, nodes)
-                parse_pratt_alt_items(ir, self_name, pr, items, tokens, pos1, i + 1, children, self_bp)
+                parse_pratt_alt_items(ir, self_name, pr, items, tokens, pos1, i + 1, children, self_bp, recover_or(recovered, recovered1))
             }
-            None => None
+            NodesFail(fail_pos) => {
+                let recover_pos = try_local_recovery_position(item, items, tokens, fail_pos, i + 1)
+                if recover_pos >= 0 {
+                    parse_pratt_alt_items(ir, self_name, pr, items, tokens, recover_pos, i + 1, children, self_bp, 1)
+                }
+                else { NodesFail(fail_pos) }
+            }
         }
     }
 
-def parse_pratt_arm_alts(ir: GrammarIr, rule_name: Str, self_name: Str, pr: IrPrattRule, alts: Vec, tokens: Vec, pos: i64, alt_i: i64, self_bp: i64, lhs: Option[DebugAST]): Option[(DebugAST, i64)] =
-    if alt_i >= vec_len(alts) { None }
+def parse_pratt_arm_alts(ir: GrammarIr, rule_name: Str, self_name: Str, pr: IrPrattRule, alts: Vec, tokens: Vec, pos: i64, alt_i: i64, self_bp: i64, lhs: Option[DebugAST], best_fail: i64): DebugParseResult =
+    if alt_i >= vec_len(alts) { ParseFail(best_fail) }
     else {
         let alt = vec_get(alts, alt_i) as IrAlt
         match parse_pratt_alt(ir, rule_name, self_name, pr, alt, tokens, pos, self_bp, lhs) {
-            Some(res) => Some(res)
-            None => parse_pratt_arm_alts(ir, rule_name, self_name, pr, alts, tokens, pos, alt_i + 1, self_bp, lhs)
+            ParseOK(node, pos1, recovered) => ParseOK(node, pos1, recovered)
+            ParseFail(fail_pos) => {
+                if fail_pos > pos { ParseFail(fail_pos) }
+                else { parse_pratt_arm_alts(ir, rule_name, self_name, pr, alts, tokens, pos, alt_i + 1, self_bp, lhs, fail_deeper(best_fail, fail_pos)) }
+            }
         }
     }
 
-def parse_pratt_prefix_blocks(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, prefixes: Vec, tokens: Vec, pos: i64, i: i64): Option[(DebugAST, i64)] =
-    if i >= vec_len(prefixes) { None }
+def parse_pratt_prefix_blocks(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, prefixes: Vec, tokens: Vec, pos: i64, i: i64, best_fail: i64): DebugParseResult =
+    if i >= vec_len(prefixes) { ParseFail(best_fail) }
     else {
         let blk = vec_get(prefixes, i) as IrPrefixBlock
         match blk {
             IrPrefixBlock(bp, arms) => {
-                match parse_pratt_arm_alts(ir, rule_name, rule_name, pr, arms, tokens, pos, 0, bp, None) {
-                    Some(res) => Some(res)
-                    None => parse_pratt_prefix_blocks(ir, rule_name, pr, prefixes, tokens, pos, i + 1)
+                match parse_pratt_arm_alts(ir, rule_name, rule_name, pr, arms, tokens, pos, 0, bp, None, pos) {
+                    ParseOK(node, pos1, recovered) => ParseOK(node, pos1, recovered)
+                    ParseFail(fail_pos) => parse_pratt_prefix_blocks(ir, rule_name, pr, prefixes, tokens, pos, i + 1, fail_deeper(best_fail, fail_pos))
                 }
             }
         }
     }
 
-def parse_pratt_postfix_blocks(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, postfixes: Vec, lhs: DebugAST, tokens: Vec, pos: i64, i: i64, min_bp: i64): Option[(DebugAST, i64)] =
-    if i >= vec_len(postfixes) { None }
+def parse_pratt_postfix_blocks(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, postfixes: Vec, lhs: DebugAST, tokens: Vec, pos: i64, i: i64, min_bp: i64, best_fail: i64): DebugParseResult =
+    if i >= vec_len(postfixes) { ParseFail(best_fail) }
     else {
         let blk = vec_get(postfixes, i) as IrPostfixBlock
         match blk {
             IrPostfixBlock(bp, arms) => {
-                if bp < min_bp { parse_pratt_postfix_blocks(ir, rule_name, pr, postfixes, lhs, tokens, pos, i + 1, min_bp) }
+                if bp < min_bp { parse_pratt_postfix_blocks(ir, rule_name, pr, postfixes, lhs, tokens, pos, i + 1, min_bp, best_fail) }
                 else {
-                    match parse_pratt_arm_alts(ir, rule_name, rule_name, pr, arms, tokens, pos, 0, bp, Some(lhs)) {
-                        Some(res) => Some(res)
-                        None => parse_pratt_postfix_blocks(ir, rule_name, pr, postfixes, lhs, tokens, pos, i + 1, min_bp)
+                    match parse_pratt_arm_alts(ir, rule_name, rule_name, pr, arms, tokens, pos, 0, bp, Some(lhs), pos) {
+                        ParseOK(node, pos1, recovered) => ParseOK(node, pos1, recovered)
+                        ParseFail(fail_pos) => parse_pratt_postfix_blocks(ir, rule_name, pr, postfixes, lhs, tokens, pos, i + 1, min_bp, fail_deeper(best_fail, fail_pos))
                     }
                 }
             }
         }
     }
 
-def parse_pratt_infix_blocks(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, infixes: Vec, lhs: DebugAST, tokens: Vec, pos: i64, i: i64, min_bp: i64): Option[(DebugAST, i64)] =
-    if i >= vec_len(infixes) { None }
+def parse_pratt_infix_blocks(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, infixes: Vec, lhs: DebugAST, tokens: Vec, pos: i64, i: i64, min_bp: i64, best_fail: i64): DebugParseResult =
+    if i >= vec_len(infixes) { ParseFail(best_fail) }
     else {
         let blk = vec_get(infixes, i) as IrInfixBlock
         match blk {
             IrInfixBlock(lbp, rbp, arms) => {
-                if lbp < min_bp { parse_pratt_infix_blocks(ir, rule_name, pr, infixes, lhs, tokens, pos, i + 1, min_bp) }
+                if lbp < min_bp { parse_pratt_infix_blocks(ir, rule_name, pr, infixes, lhs, tokens, pos, i + 1, min_bp, best_fail) }
                 else {
-                    match parse_pratt_arm_alts(ir, rule_name, rule_name, pr, arms, tokens, pos, 0, rbp, Some(lhs)) {
-                        Some(res) => Some(res)
-                        None => parse_pratt_infix_blocks(ir, rule_name, pr, infixes, lhs, tokens, pos, i + 1, min_bp)
+                    match parse_pratt_arm_alts(ir, rule_name, rule_name, pr, arms, tokens, pos, 0, rbp, Some(lhs), pos) {
+                        ParseOK(node, pos1, recovered) => ParseOK(node, pos1, recovered)
+                        ParseFail(fail_pos) => parse_pratt_infix_blocks(ir, rule_name, pr, infixes, lhs, tokens, pos, i + 1, min_bp, fail_deeper(best_fail, fail_pos))
                     }
                 }
             }
         }
     }
 
-def parse_pratt_suffix_loop(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, lhs: DebugAST, tokens: Vec, pos: i64, min_bp: i64): Option[(DebugAST, i64)] =
+def parse_pratt_suffix_loop(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, lhs: DebugAST, tokens: Vec, pos: i64, min_bp: i64): DebugParseResult =
     match pr {
         IrPrattRule(_, infixes, postfixes) => {
-            match parse_pratt_postfix_blocks(ir, rule_name, pr, postfixes, lhs, tokens, pos, 0, min_bp) {
-                Some((lhs1, pos1)) => parse_pratt_suffix_loop(ir, rule_name, pr, lhs1, tokens, pos1, min_bp)
-                None => {
-                    match parse_pratt_infix_blocks(ir, rule_name, pr, infixes, lhs, tokens, pos, 0, min_bp) {
-                        Some((lhs1, pos1)) => parse_pratt_suffix_loop(ir, rule_name, pr, lhs1, tokens, pos1, min_bp)
-                        None => Some((lhs, pos))
+            match parse_pratt_postfix_blocks(ir, rule_name, pr, postfixes, lhs, tokens, pos, 0, min_bp, pos) {
+                ParseOK(lhs1, pos1, recovered1) => {
+                    match parse_pratt_suffix_loop(ir, rule_name, pr, lhs1, tokens, pos1, min_bp) {
+                        ParseOK(lhs2, pos2, recovered2) => ParseOK(lhs2, pos2, recover_or(recovered1, recovered2))
+                        ParseFail(fail_pos) => ParseFail(fail_pos)
+                    }
+                }
+                ParseFail(postfix_fail) => {
+                    match parse_pratt_infix_blocks(ir, rule_name, pr, infixes, lhs, tokens, pos, 0, min_bp, pos) {
+                        ParseOK(lhs1, pos1, recovered1) => {
+                            match parse_pratt_suffix_loop(ir, rule_name, pr, lhs1, tokens, pos1, min_bp) {
+                                ParseOK(lhs2, pos2, recovered2) => ParseOK(lhs2, pos2, recover_or(recovered1, recovered2))
+                                ParseFail(fail_pos) => ParseFail(fail_pos)
+                            }
+                        }
+                        ParseFail(infix_fail) => {
+                            let fail_pos = fail_deeper(postfix_fail, infix_fail)
+                            if fail_pos > pos { ParseFail(fail_pos) }
+                            else { ParseOK(lhs, pos, 0) }
+                        }
                     }
                 }
             }
         }
     }
 
-def parse_pratt_rule_bp(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, tokens: Vec, pos: i64, min_bp: i64): Option[(DebugAST, i64)] =
+def parse_pratt_rule_bp(ir: GrammarIr, rule_name: Str, pr: IrPrattRule, tokens: Vec, pos: i64, min_bp: i64): DebugParseResult =
     match pr {
         IrPrattRule(prefixes, _, _) => {
-            match parse_pratt_prefix_blocks(ir, rule_name, pr, prefixes, tokens, pos, 0) {
-                Some((lhs, pos1)) => parse_pratt_suffix_loop(ir, rule_name, pr, lhs, tokens, pos1, min_bp)
-                None => None
+            match parse_pratt_prefix_blocks(ir, rule_name, pr, prefixes, tokens, pos, 0, pos) {
+                ParseOK(lhs, pos1, recovered1) => {
+                    match parse_pratt_suffix_loop(ir, rule_name, pr, lhs, tokens, pos1, min_bp) {
+                        ParseOK(node, pos2, recovered2) => ParseOK(node, pos2, recover_or(recovered1, recovered2))
+                        ParseFail(fail_pos) => ParseFail(fail_pos)
+                    }
+                }
+                ParseFail(fail_pos) => ParseFail(fail_pos)
             }
         }
     }
 
-def parse_rule_named(ir: GrammarIr, name: Str, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+def parse_rule_named(ir: GrammarIr, name: Str, tokens: Vec, pos: i64): DebugParseResult =
     match find_rule_named(ir_rules(ir), name) {
-        None => None
+        None => ParseFail(pos)
         Some(rule) => parse_rule(ir, rule, tokens, pos)
     }
 
-def parse_rule_named_with_file(file: FileAst, ir: GrammarIr, name: Str, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+def parse_rule_named_with_file(file: FileAst, ir: GrammarIr, name: Str, tokens: Vec, pos: i64): DebugParseResult =
     match find_rule_named(ir_rules(ir), name) {
-        None => None
+        None => ParseFail(pos)
         Some(rule) => parse_rule_with_file(file, ir, rule, tokens, pos)
     }
 
-def parse_rule(ir: GrammarIr, rule: IrRule, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+def parse_rule(ir: GrammarIr, rule: IrRule, tokens: Vec, pos: i64): DebugParseResult =
     match ir_rule_body(rule) {
-        IrBodyAlts(alts) => parse_rule_alts(ir, ir_rule_name(rule), alts, tokens, pos, 0)
+        IrBodyAlts(alts) => parse_rule_alts(ir, ir_rule_name(rule), alts, tokens, pos, 0, pos)
         IrBodyPratt(pr) => parse_pratt_rule_bp(ir, ir_rule_name(rule), pr, tokens, pos, 0)
     }
 
-def parse_rule_with_file(file: FileAst, ir: GrammarIr, rule: IrRule, tokens: Vec, pos: i64): Option[(DebugAST, i64)] =
+def parse_rule_with_file(file: FileAst, ir: GrammarIr, rule: IrRule, tokens: Vec, pos: i64): DebugParseResult =
     match ir_rule_body(rule) {
-        IrBodyAlts(alts) => parse_rule_alts_with_file(file, ir, ir_rule_name(rule), alts, tokens, pos, 0)
+        IrBodyAlts(alts) => parse_rule_alts_with_file(file, ir, ir_rule_name(rule), alts, tokens, pos, 0, pos)
         IrBodyPratt(pr) => parse_pratt_rule_bp(ir, ir_rule_name(rule), pr, tokens, pos, 0)
     }
 
-def parse_rule_alts(ir: GrammarIr, rule_name: Str, alts: Vec, tokens: Vec, pos: i64, i: i64): Option[(DebugAST, i64)] =
-    if i >= vec_len(alts) { None }
+def parse_rule_alts(ir: GrammarIr, rule_name: Str, alts: Vec, tokens: Vec, pos: i64, i: i64, best_fail: i64): DebugParseResult =
+    if i >= vec_len(alts) { ParseFail(best_fail) }
     else {
         let alt = vec_get(alts, i) as IrAlt
         match parse_alt(ir, rule_name, alt, tokens, pos) {
-            Some(res) => Some(res)
-            None => parse_rule_alts(ir, rule_name, alts, tokens, pos, i + 1)
+            ParseOK(node, pos1, recovered) => ParseOK(node, pos1, recovered)
+            ParseFail(fail_pos) => {
+                if fail_pos > pos { ParseFail(fail_pos) }
+                else { parse_rule_alts(ir, rule_name, alts, tokens, pos, i + 1, fail_deeper(best_fail, fail_pos)) }
+            }
         }
     }
 
-def parse_rule_alts_with_file(file: FileAst, ir: GrammarIr, rule_name: Str, alts: Vec, tokens: Vec, pos: i64, i: i64): Option[(DebugAST, i64)] =
-    if i >= vec_len(alts) { None }
+def parse_rule_alts_with_file(file: FileAst, ir: GrammarIr, rule_name: Str, alts: Vec, tokens: Vec, pos: i64, i: i64, best_fail: i64): DebugParseResult =
+    if i >= vec_len(alts) { ParseFail(best_fail) }
     else {
         let alt = vec_get(alts, i) as IrAlt
         match parse_alt_with_file(file, ir, rule_name, alt, tokens, pos) {
-            Some(res) => Some(res)
-            None => parse_rule_alts_with_file(file, ir, rule_name, alts, tokens, pos, i + 1)
+            ParseOK(node, pos1, recovered) => ParseOK(node, pos1, recovered)
+            ParseFail(fail_pos) => {
+                if fail_pos > pos { ParseFail(fail_pos) }
+                else { parse_rule_alts_with_file(file, ir, rule_name, alts, tokens, pos, i + 1, fail_deeper(best_fail, fail_pos)) }
+            }
         }
     }
 
 def run_start_rule(ir: GrammarIr, tokens: Vec): LabeledAST =
     match parse_rule_named(ir, ir_start_rule(ir), tokens, 0) {
-        Some((ast, pos)) => {
-            if pos == vec_len(tokens) { OK(ast, token_prefix(tokens, pos)) }
+        ParseOK(ast, pos, recovered) => {
+            if pos == vec_len(tokens) && recovered == 0 { OK(ast, token_prefix(tokens, pos)) }
             else { Err(Some(ast), token_prefix(tokens, pos)) }
         }
-        None => Err(None, empty_consumed_tokens())
+        ParseFail(fail_pos) => Err(None, token_prefix(tokens, fail_pos))
     }
 
 def run_start_rule_with_file(file: FileAst, ir: GrammarIr, source_src: Str): LabeledAST = {
     let tokens = source_token_tags(source_src)
     match parse_rule_named_with_file(file, ir, ir_start_rule(ir), tokens, 0) {
-        Some((ast, pos)) => {
-            if pos == vec_len(tokens) { OK(ast, token_prefix(tokens, pos)) }
+        ParseOK(ast, pos, recovered) => {
+            if pos == vec_len(tokens) && recovered == 0 { OK(ast, token_prefix(tokens, pos)) }
             else { Err(Some(ast), token_prefix(tokens, pos)) }
         }
-        None => Err(None, empty_consumed_tokens())
+        ParseFail(fail_pos) => Err(None, token_prefix(tokens, fail_pos))
     }
 }

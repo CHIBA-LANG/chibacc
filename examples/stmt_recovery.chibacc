@@ -1,0 +1,15 @@
+#![CHIBACC]
+{
+    namespace parser.chiba
+}
+start program
+rule program ::= items:stmt* Eof => Program(items) ;
+rule stmt ::= Let name:Ident Assign value:expr Semi => StmtLet(name, value) ;
+rule expr ::= name:Ident => Expr_Name(name) ;
+{
+    data AST {
+        Program(Vec),
+        StmtLet(Str, AST),
+        Expr_Name(Str)
+    }
+}

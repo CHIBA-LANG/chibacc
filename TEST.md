@@ -168,6 +168,7 @@ Expected result:
 - `source.xxx` is currently interpreted as whitespace-separated token tags by both the debug runtime and the generated-parser runner bridge.
 - `main.chiba` now prefers generated parser execution for the `LabeledAST` section and falls back to the debug runtime only when the generated bridge cannot build or execute.
 - The generated-parser bridge no longer depends on `working/`; it uses the internal project at `chibacc/generated_runner`.
+- The generated runner accepts token-tag input from either `stdin` or an optional source-file path passed as `argv[1]`.
 - The debug runtime fallback now has a file-aware entrypoint that can execute ordinary token-bound predicates via the same internal runner project.
 - Generated parser execution is also validated through isolated runner projects under `working/`.
 - Pratt runtime and Pratt codegen are already wired through the sample chains above.
@@ -193,3 +194,89 @@ Current scope:
 ```text
 run_start_rule_with_file(...) currently executes ordinary token-bound predicates.
 ```
+
+## 9. Recovery Check
+
+The generated Pratt parser should now preserve the deepest consumed token prefix on malformed input instead of collapsing to an empty failure.
+
+Use the existing sample grammar with a missing closing parenthesis:
+
+```text
+./chibacc/target/debug/main.o \
+  chibacc/examples/sample.chibacc \
+  chibacc/examples/sample_missing_rparen.source \
+  -o chibacc/examples/sample_missing_rparen.out
+```
+
+Expected `LabeledAST` section:
+
+```text
+== LabeledAST ==
+GeneratedParser.Err
+HasPartialAst: 0
+ConsumedCount: 2
+ConsumedTokens: LParen Ident
+```
+
+After that command regenerates and rebuilds the internal runner, the generated parser can be checked directly in either mode:
+
+```text
+cat chibacc/examples/sample_missing_rparen.source \
+  | ./chibacc/generated_runner/target/debug/main.o
+
+./chibacc/generated_runner/target/debug/main.o \
+  chibacc/examples/sample_missing_rparen.source
+```
+
+Expected direct runner result in both cases:
+
+```text
+GeneratedParser.Err
+HasPartialAst: 0
+ConsumedCount: 2
+ConsumedTokens: LParen Ident
+```
+
+Nested-rule recovery is also validated with a deeper malformed token stream:
+
+```text
+printf 'Ident LParen Ident Comma RParen Dot Ident' \
+  > /tmp/generated_nested_recovery.source
+
+./chibacc/generated_runner/target/debug/main.o \
+  /tmp/generated_nested_recovery.source
+```
+
+Expected result:
+
+```text
+GeneratedParser.Err
+HasPartialAst: 1
+ConsumedCount: 7
+ConsumedTokens: Ident LParen Ident Comma RParen Dot Ident
+```
+
+Stmt-level recovery is also validated with a minimal statement-list grammar where the first statement is missing an expression before `Semi`, but the parser still resynchronizes at the statement boundary and continues into the next statement:
+
+```text
+./chibacc/target/debug/main.o \
+  chibacc/examples/stmt_recovery.chibacc \
+  chibacc/examples/stmt_recovery_missing_expr.source \
+  -o /tmp/stmt_recovery.out
+
+./main.o --project chibacc/generated_runner
+
+./chibacc/generated_runner/target/debug/main.o \
+  chibacc/examples/stmt_recovery_missing_expr.source
+```
+
+Expected result:
+
+```text
+GeneratedParser.Err
+HasPartialAst: 1
+ConsumedCount: 9
+ConsumedTokens: Let Ident Assign Semi Let Ident Assign Ident Semi
+```
+
+The current recovery slice now covers malformed Pratt-prefix input, nested per-rule recovery, and stmt-level recovery in generated execution, while preserving the deepest consumed prefix instead of collapsing to an empty failure.
